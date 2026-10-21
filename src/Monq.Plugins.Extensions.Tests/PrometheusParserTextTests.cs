@@ -5,8 +5,7 @@ namespace Monq.Plugins.Extensions.Tests;
 
 public sealed class PrometheusParserTextTests
 {
-    // Fennel-овский Prometheus.ParseText: целый текст одним вызовом,
-    // терпимо — не-метрические и битые строки пропускаются, исключений нет.
+    // ParseText processes a complete document and skips non-metric or malformed lines.
 
     [Fact]
     // Тот же корпус спецификации, что и TryParseLine_PrometheusSpecCorpus:

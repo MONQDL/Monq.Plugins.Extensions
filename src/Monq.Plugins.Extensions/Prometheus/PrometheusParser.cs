@@ -131,38 +131,14 @@ public static partial class PrometheusParser
     /// Форматирует значение метрики в инвариантной культуре.
     /// </summary>
     internal static string FormatValue(double value)
-    {
-        if (double.IsNaN(value))
-            return "Nan";
-
-        // Формы спецификации; Fennel (pfloat, case-fold) принимает их обратно —
-        // круг ре-эмита замыкается (корпус: something_weird … +Inf)
-        if (double.IsPositiveInfinity(value))
-            return "+Inf";
-
-        if (double.IsNegativeInfinity(value))
-            return "-Inf";
-
-        return value.ToString(CultureInfo.InvariantCulture);
-    }
+        => FormatSpecialValue(value) ?? value.ToString(CultureInfo.InvariantCulture);
 
     static void AppendValue(StringBuilder sb, double value)
     {
-        if (double.IsNaN(value))
+        var specialValue = FormatSpecialValue(value);
+        if (specialValue is not null)
         {
-            sb.Append("Nan");
-            return;
-        }
-
-        if (double.IsPositiveInfinity(value))
-        {
-            sb.Append("+Inf");
-            return;
-        }
-
-        if (double.IsNegativeInfinity(value))
-        {
-            sb.Append("-Inf");
+            sb.Append(specialValue);
             return;
         }
 
@@ -175,6 +151,14 @@ public static partial class PrometheusParser
 
         sb.Append(buffer[..charsWritten]);
     }
+
+    static string? FormatSpecialValue(double value) => value switch
+    {
+        var number when double.IsNaN(number) => "Nan",
+        double.PositiveInfinity => "+Inf",
+        double.NegativeInfinity => "-Inf",
+        _ => null
+    };
 
     /// <summary>
     /// Parses all valid metric lines from Prometheus text, such as a <c>/metrics</c> response.
@@ -457,9 +441,8 @@ public static partial class PrometheusParser
         if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms))
             return false;
 
-        // Проверка диапазона: int64 влезает шире диапазона DateTimeOffset, и
-        // FromUnixTimeMilliseconds на нём бросает — такая строка невалидна,
-        // а не весь текст (контракт: терпимо, без исключений)
+        // Int64 covers a wider range than DateTimeOffset. Treat an out-of-range timestamp as an
+        // invalid metric line instead of allowing FromUnixTimeMilliseconds to throw.
         if (ms < _minTimestampMs || ms > _maxTimestampMs)
             return false;
 

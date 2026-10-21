@@ -7,8 +7,7 @@ public sealed class PrometheusParserTests
 {
     static readonly DateTimeOffset _timestamp = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
 
-    // Векторы из тестового корпуса Fennel (CSharpApiTests / ParserTests) — якорь
-    // паритетности: всё, что Fennel парсит, мы парсим в тот же результат.
+    // Test vectors cover the supported Prometheus text exposition syntax.
 
     [Fact]
     public void TryParseLine_FullLine()
@@ -45,7 +44,7 @@ public sealed class PrometheusParserTests
     [Fact]
     public void TryParseLine_PositiveInf()
     {
-        // Строка из корпуса Prometheus (и ParserTests.fs): Fennel парсит её pfloat'ом
+        // Line from the Prometheus specification corpus.
         var ok = PrometheusParser.TryParseLine("something_weird{problem=\"division by zero\"} +Inf -3982045", out var m);
 
         Assert.True(ok);
@@ -63,7 +62,7 @@ public sealed class PrometheusParserTests
     }
 
     [Fact]
-    // Экранированные значения из корпуса Fennel (escaping in label values)
+    // Escaped values from the Prometheus parser corpus.
     public void TryParseLine_EscapesLabelValues()
     {
         var ok = PrometheusParser.TryParseLine(
@@ -106,13 +105,12 @@ public sealed class PrometheusParserTests
         Assert.Null(m!.Value);
     }
 
-    // Терпимость сверх Fennel (он такие строки отбрасывает — старые плагины теряли их молча)
+    // Additional accepted input forms that are normalized when rendered.
 
     [Fact]
     public void TryParseLine_NaNIsAccepted()
     {
-        // Fennel (case-fold) принимает и «NaN» — разница в результате: Fennel
-        // возвращает double.NaN, мы отдаём null (см. заголовок PrometheusParser)
+        // Both supported NaN spellings are represented by a null value.
         var ok = PrometheusParser.TryParseLine("metric_with_nan NaN", out var m);
 
         Assert.True(ok);
@@ -141,7 +139,7 @@ public sealed class PrometheusParserTests
     [Fact]
     public void TryParseLine_NoSpaceBetweenLabelsAndValue()
     {
-        // Квирк Fennel: после '}' пробел не обязателен
+        // Whitespace after the label block is optional.
         var ok = PrometheusParser.TryParseLine("m{a=\"1\"}2", out var m);
 
         Assert.True(ok);
@@ -181,21 +179,19 @@ public sealed class PrometheusParserTests
     }
 
     [Fact]
-    // Границы диапазона: DateTimeOffset.MinValue/MaxValue сами валидны (off-by-one)
+    // DateTimeOffset.MinValue and the last complete millisecond of MaxValue remain valid.
     public void TryParseLine_TimestampAtDateTimeOffsetBoundaries_Accepted()
     {
         Assert.True(PrometheusParser.TryParseLine("m 1 -62135596800000", out var min));
         Assert.Equal(DateTimeOffset.MinValue, min!.Timestamp);
 
-        // Миллисекундная верхняя граница строго не равна MaxValue: дробная часть
-        // MaxValue (.9999999 с) обрубается до .999 с — проверяем round-trip в мс
+        // MaxValue has sub-millisecond ticks, so verify the upper boundary through milliseconds.
         Assert.True(PrometheusParser.TryParseLine("m 1 253402300799999", out var max));
         Assert.Equal(253402300799999, max!.Timestamp!.Value.ToUnixTimeMilliseconds());
     }
 
     [Fact]
-    // «:» в имени лейбла: Fennel (pname) принимает его и в парсере, и в агенте —
-    // канонический флоу «скрап -> докинуть лейбл -> ре-эмит» не должен падать
+    // A colon in a label name must survive the parse-enrich-render pipeline.
     public void TryParseLine_LabelNameWithColon_RoundTripThroughGenerator()
     {
         Assert.True(PrometheusParser.TryParseLine("m{a:b=\"1\"} 1", out var parsed));
@@ -208,8 +204,7 @@ public sealed class PrometheusParserTests
     }
 
     [Fact]
-    // Полный корпус спецификации Prometheus (из ParserTests.fs): 20 метрик из 36 строк —
-    // ровно столько же, сколько подтверждает тест Fennel.
+    // The Prometheus specification corpus contains 20 metrics among its 36 lines.
     public void TryParseLine_PrometheusSpecCorpus()
     {
         const string corpus = """
