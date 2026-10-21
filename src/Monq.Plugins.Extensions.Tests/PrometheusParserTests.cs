@@ -17,7 +17,7 @@ public sealed class PrometheusParserTests
 
         Assert.True(ok);
         Assert.Equal("http_requests_total", m!.Name);
-        Assert.Equal(new[] { ("method", "post"), ("code", "200") }, m.Labels);
+        Assert.Equal(new Dictionary<string, string> { ["method"] = "post", ["code"] = "200" }, m.Labels);
         Assert.Equal(1027.0, m.Value);
         Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1395066363000), m.Timestamp);
     }
@@ -71,7 +71,9 @@ public sealed class PrometheusParserTests
             out var m);
 
         Assert.True(ok);
-        Assert.Equal(new[] { ("path", @"C:\DIR\FILE.TXT"), ("error", "Cannot find file:\n \"FILE.TXT\" ") }, m!.Labels);
+        Assert.Equal(
+            new Dictionary<string, string> { ["path"] = @"C:\DIR\FILE.TXT", ["error"] = "Cannot find file:\n \"FILE.TXT\" " },
+            m!.Labels);
         Assert.Equal(1.458255915e9, m.Value);
         Assert.Null(m.Timestamp);
     }
@@ -91,7 +93,7 @@ public sealed class PrometheusParserTests
         var ok = PrometheusParser.TryParseLine("http_request_duration_seconds_bucket{le=\"+Inf\"} 144320", out var m);
 
         Assert.True(ok);
-        Assert.Equal(new[] { ("le", "+Inf") }, m!.Labels);
+        Assert.Equal(new Dictionary<string, string> { ["le"] = "+Inf" }, m!.Labels);
         Assert.Equal(144320.0, m.Value);
     }
 
@@ -123,7 +125,7 @@ public sealed class PrometheusParserTests
         var ok = PrometheusParser.TryParseLine("m{a=\"1\",} 2", out var m);
 
         Assert.True(ok);
-        Assert.Equal(new[] { ("a", "1") }, m!.Labels);
+        Assert.Equal(new Dictionary<string, string> { ["a"] = "1" }, m!.Labels);
         Assert.Equal(2.0, m.Value);
     }
 
@@ -232,23 +234,36 @@ public sealed class PrometheusParserTests
 
     [Fact]
     // Замыкание контура: парсинг -> генерация -> парсинг дают тот же результат.
+    // Мутабельные лейблы из распаршенной метрики уходят в MetricLine напрямую.
     public void TryParseLine_RoundTripThroughGenerator()
     {
         var original = "tcp_probe_duration_seconds{instance=\"example.com\",port=\"8080\",note=\"a\\nb\"} 0.0123 1395066363000";
         Assert.True(PrometheusParser.TryParseLine(original, out var m));
 
-        var regenerated = PrometheusParser.MetricLine(
-            m!.Name,
-            m.Value!.Value,
-            m.Labels.ToDictionary(l => l.Name, l => l.Value),
-            m.Timestamp!.Value);
+        var regenerated = PrometheusParser.MetricLine(m!.Name, m.Value!.Value, m.Labels, m.Timestamp!.Value);
 
         Assert.True(PrometheusParser.TryParseLine(regenerated, out var m2));
 
-        // record == сравнивает Labels (IReadOnlyList) по ссылке, поэтому — по компонентам
         Assert.Equal(m.Name, m2!.Name);
         Assert.Equal(m.Labels, m2.Labels);
         Assert.Equal(m.Value, m2.Value);
         Assert.Equal(m.Timestamp, m2.Timestamp);
+    }
+
+    // Мутабельные лейблы распарсенной метрики: добавление/замена/удаление и ре-эмит
+
+    [Fact]
+    public void ParsedMetric_Labels_CanBeAddedReplacedAndRemoved()
+    {
+        Assert.True(PrometheusParser.TryParseLine("m{a=\"1\",b=\"2\"} 3", out var m));
+
+        m!.Labels["a"] = "10";    // замена
+        m.Labels["c"] = "3";     // добавление
+        m.Labels.Remove("b");    // удаление
+
+        Assert.Equal(new Dictionary<string, string> { ["a"] = "10", ["c"] = "3" }, m.Labels);
+
+        var line = PrometheusParser.MetricLine(m.Name, m.Value!.Value, m.Labels, Ts);
+        Assert.Equal("m{a=\"10\",c=\"3\"} 3 1690000000000", line);
     }
 }

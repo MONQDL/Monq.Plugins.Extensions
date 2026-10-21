@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -8,9 +9,28 @@ namespace Monq.Plugins.Prometheus;
 // Самодостаточен, без внешних зависимостей: задуман как общее решение для плагинов —
 //   * «генератор»: плагин выбрасывает метрики в артефакт «metrics» (агент парсит
 //     эти строки своим парсером Fennel, поэтому генерация ниже — контракт);
-//   * «парсер»: плагин скрапит чужой /metrics и докидывает свои лейблы
-//     (TryParseLine) — терпимый, без исключений, в стиле, в котором это делали
-//     старые плагины поверх Fennel (битые строки прокидываются, а не роняют задачу).
+//   * «парсер»: плагин скрапит чужой /metrics (ParseText/TryParseLine) и докидывает
+//     свои лейблы в распарсенные метрики (ParsedMetric.Labels) — терпимо, без
+//     исключений, в стиле, в котором это делали старые плагины поверх Fennel
+//     (битые строки прокидываются, а не роняют задачу).
+//
+// ПАРИТЕТ API С FENNEL (github.com/dburriss/fennel, фасад CSharp.fs) — удобство,
+// которым пользовались старые плагины:
+//   - ParseText(text) — парсит целый текст /metrics одним вызовом (у Fennel —
+//     Prometheus.ParseText). Терпимый: не-метрические (HELP/TYPE/комментарии/
+//     пустые) и некорректные строки пропускаются, исключение не бросается.
+//     Прогон — один проход по тексту без промежуточных копий строк построчно;
+//   - ParsedMetric.Labels — мутабельный словарь (у Fennel — Metric.Labels :
+//     IDictionary<string,string>): после разбора лейблы можно добавлять,
+//     заменять и удалять, дальше метрика идёт в MetricLine напрямую;
+//   - TryParseLine / MetricLine — терпимые аналоги Fennel'овских
+//     Prometheus.ParseLine / Prometheus.Metric.
+//
+// Аллокации на строку метрики намеренно минимальны: значение и timestamp читаются
+// из строки напрямую, без нарезки токенов в новые строки; значение лейбла копируется
+// ровно один раз — без эскейпов это слайс исходной строки, с эскейпами —
+// StringBuilder; без лейблов промежуточные коллекции не создаются, а дубликаты
+// имён ловит Dictionary.TryAdd (отдельный HashSet не нужен).
 //
 // Контракт формата:
 //   name{label="value",...} value [timestamp_millis]
@@ -135,15 +155,53 @@ public static class PrometheusParser
     }
 
     /// <summary>
+    /// Парсит целый текст (например, ответ /metrics) — все строки метрик одним
+    /// вызовом. Терпимый, как <see cref="TryParseLine(string?, out ParsedMetric?)"/>: не-метрические
+    /// (HELP/TYPE/комментарии/пустые) и некорректные строки пропускаются,
+    /// исключение не бросается.
+    /// </summary>
+    public static IReadOnlyList<ParsedMetric> ParseText(string? text)
+    {
+        var metrics = new List<ParsedMetric>();
+        if (string.IsNullOrEmpty(text))
+            return metrics;
+
+        // Один проход по тексту; строки режутся индексами, без Split и
+        // промежуточных строк (TryParseLine принимает span напрямую).
+        int start = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '\n')
+                continue;
+
+            if (TryParseLine(text.AsSpan(start, i - start), out var line))
+                metrics.Add(line);
+            start = i + 1;
+        }
+
+        // Последняя строка без завершающего '\n'
+        if (start < text.Length && TryParseLine(text.AsSpan(start), out var lastLine))
+            metrics.Add(lastLine);
+
+        return metrics;
+    }
+
+    /// <summary>
     /// Парсит одну строку метрики. Терпимый: для не-метрических (HELP/TYPE/комментарии/
     /// пустые) и некорректных строк возвращает <c>false</c> вместо броска исключения.
     /// </summary>
-    public static bool TryParseLine(string? line, out ParsedMetric? metric)
+    public static bool TryParseLine(string? line, [NotNullWhen(true)] out ParsedMetric? metric)
     {
         metric = null;
         if (string.IsNullOrWhiteSpace(line))
             return false;
 
+        return TryParseLine(line.AsSpan(), out metric);
+    }
+
+    static bool TryParseLine(ReadOnlySpan<char> line, [NotNullWhen(true)] out ParsedMetric? metric)
+    {
+        metric = null;
         int pos = 0;
 
         // 1) Имя метрики
@@ -153,15 +211,17 @@ public static class PrometheusParser
         int nameStart = pos;
         while (pos < line.Length && IsNameChar(line[pos]))
             pos++;
-        var name = line[nameStart..pos];
+        var name = line[nameStart..pos].ToString();
         // ДЫРА (см. заголовок): принимаем имя в 1 символ; Fennel (manyChars2) требует >= 2.
 
-        // 2) Необязательный блок лейблов
-        var labels = new List<(string, string)>();
+        // 2) Необязательный блок лейблов.
+        // Словарь и собирает пары, и отбраковывает дубликаты имён (TryAdd);
+        // порядок вставки сохранён, поэтому ре-эмит воспроизводит порядок лейблов.
+        Dictionary<string, string>? labels = null;
         SkipWhitespace(line, ref pos);
         if (pos < line.Length && line[pos] == '{')
         {
-            if (!TryParseLabels(line, ref pos, labels))
+            if (!TryParseLabels(line, ref pos, ref labels))
                 return false;
         }
 
@@ -181,18 +241,14 @@ public static class PrometheusParser
         if (pos != line.Length)
             return false;
 
-        metric = new ParsedMetric(name, labels, value, timestamp);
+        metric = new ParsedMetric(name, labels ?? new Dictionary<string, string>(), value, timestamp);
         return true;
     }
 
-    static bool TryParseLabels(string line, ref int pos, List<(string, string)> labels)
+    static bool TryParseLabels(ReadOnlySpan<char> line, ref int pos, ref Dictionary<string, string>? labels)
     {
         // pos указывает на '{'
         pos++;
-
-        // Дубликаты имён лейблов отвергаем: обёртка Fennel на них падает
-        // (dict с дубликатами), а старые плагины такие строки прокидывают.
-        var seen = new HashSet<string>(StringComparer.Ordinal);
 
         while (true)
         {
@@ -211,10 +267,8 @@ public static class PrometheusParser
             int nameStart = pos;
             while (pos < line.Length && IsNameChar(line[pos]))
                 pos++;
-            var labelName = line[nameStart..pos];
+            var labelName = line[nameStart..pos].ToString();
             // ДЫРА (см. заголовок): принимаем имя лейбла в 1 символ; Fennel требует >= 2.
-            if (!seen.Add(labelName))
-                return false;
 
             // '='
             SkipWhitespace(line, ref pos);
@@ -229,38 +283,14 @@ public static class PrometheusParser
             pos++;
 
             // Значение лейбла до закрывающей '"', с разэскейпингом
-            var sb = new StringBuilder();
-            bool closed = false;
-            while (pos < line.Length)
-            {
-                char c = line[pos];
-                if (c == '\\' && pos + 1 < line.Length)
-                {
-                    char next = line[pos + 1];
-                    switch (next)
-                    {
-                        case 'n': sb.Append('\n'); pos += 2; break;
-                        case 'r': sb.Append('\r'); pos += 2; break;
-                        case 't': sb.Append('\t'); pos += 2; break;
-                        case '\\': sb.Append('\\'); pos += 2; break;
-                        case '"': sb.Append('"'); pos += 2; break;
-                        default: return false;
-                    }
-                    continue;
-                }
-                if (c == '"')
-                {
-                    pos++;
-                    closed = true;
-                    break;
-                }
-                sb.Append(c);
-                pos++;
-            }
-            if (!closed)
+            if (!TryParseLabelValue(line, ref pos, out string labelValue))
                 return false;
 
-            labels.Add((labelName, sb.ToString()));
+            // Дубликаты имён лейблов отвергаем: обёртка Fennel на них падает
+            // (dict с дубликатами), а старые плагины такие строки прокидывают.
+            labels ??= new Dictionary<string, string>(4);
+            if (!labels.TryAdd(labelName, labelValue))
+                return false;
 
             // После значения: ',' (следующий лейбл) или '}' (конец блока)
             SkipWhitespace(line, ref pos);
@@ -280,27 +310,105 @@ public static class PrometheusParser
         }
     }
 
-    static bool TryParseValue(string line, ref int pos, out double? value)
+    static bool TryParseLabelValue(ReadOnlySpan<char> line, ref int pos, out string value)
+    {
+        value = string.Empty;
+        // pos указывает на первый символ после открывающей '"'
+        int valueStart = pos;
+        int valueEnd = -1;
+        bool hasEscape = false;
+
+        while (pos < line.Length)
+        {
+            char c = line[pos];
+            if (c == '\\')
+            {
+                pos++;
+                if (pos >= line.Length)
+                    return false; // «висячий» '\' в конце строки
+                char next = line[pos];
+                if (next != 'n' && next != 'r' && next != 't' && next != '\\' && next != '"')
+                    return false;
+                pos++;
+                hasEscape = true;
+            }
+            else if (c == '"')
+            {
+                valueEnd = pos;
+                pos++;
+                break;
+            }
+            else
+            {
+                pos++;
+            }
+        }
+
+        if (valueEnd < 0) // закрывающая '"' не найдена
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        // Копия значения ровно одна: без эскейпов — слайс исходной строки
+        // (StringBuilder не нужен); с эскейпами — разэскейп в билдер.
+        if (!hasEscape)
+        {
+            value = line[valueStart..valueEnd].ToString();
+            return true;
+        }
+
+        var sb = new StringBuilder(valueEnd - valueStart);
+        for (int i = valueStart; i < valueEnd; i++)
+        {
+            char c = line[i];
+            if (c != '\\')
+            {
+                sb.Append(c);
+                continue;
+            }
+            char next = line[++i];
+            sb.Append(next switch
+            {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                _ => '"'
+            });
+        }
+
+        value = sb.ToString();
+        return true;
+    }
+
+    static bool TryParseValue(ReadOnlySpan<char> line, ref int pos, out double? value)
     {
         value = null;
 
         // Токен до следующего пробела (пробел внутри значений здесь невозможен:
-        // блок лейблов, если был, уже потреблён выше)
+        // блок лейблов, если был, уже потреблён выше). Токен не режется в строку —
+        // сравнивается и парсится span'ом.
         int tokenStart = pos;
         while (pos < line.Length && !char.IsWhiteSpace(line[pos]))
             pos++;
         if (pos == tokenStart)
             return false;
+
         var token = line[tokenStart..pos];
-
-        switch (token)
+        if (token.SequenceEqual("+Inf"))
         {
-            case "+Inf": value = double.PositiveInfinity; return true;
-            case "-Inf": value = double.NegativeInfinity; return true;
-            case "NaN" or "Nan": value = null; return true;
+            value = double.PositiveInfinity;
+            return true;
         }
-
-        if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var result))
+        if (token.SequenceEqual("-Inf"))
+        {
+            value = double.NegativeInfinity;
+            return true;
+        }
+        if (token.SequenceEqual("NaN") || token.SequenceEqual("Nan"))
+            return true; // value остаётся null
+        if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out double result))
         {
             value = result;
             return true;
@@ -309,7 +417,7 @@ public static class PrometheusParser
         return false;
     }
 
-    static bool TryParseTimestamp(string line, ref int pos, out DateTimeOffset? timestamp)
+    static bool TryParseTimestamp(ReadOnlySpan<char> line, ref int pos, out DateTimeOffset? timestamp)
     {
         timestamp = null;
 
@@ -318,16 +426,16 @@ public static class PrometheusParser
             pos++;
         if (pos == tokenStart)
             return false;
-        var token = line[tokenStart..pos];
 
-        if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms))
+        var token = line[tokenStart..pos];
+        if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ms))
             return false;
 
         timestamp = DateTimeOffset.FromUnixTimeMilliseconds(ms);
         return true;
     }
 
-    static void SkipWhitespace(string line, ref int pos)
+    static void SkipWhitespace(ReadOnlySpan<char> line, ref int pos)
     {
         while (pos < line.Length && char.IsWhiteSpace(line[pos]))
             pos++;
