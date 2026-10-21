@@ -72,19 +72,12 @@ public sealed class PrometheusParserGeneratorTests
     }
 
     [Fact]
-    public void MetricLine_PositiveInfinity_Throws()
+    // Формы спецификации: Fennel (pfloat, case-fold) принимает их обратно —
+    // круг «скрап -> ре-эмит» замыкается (корпус: something_weird … +Inf)
+    public void MetricLine_Infinity_RendersSpecForms()
     {
-        var ex = Assert.Throws<ArgumentException>(() =>
-            PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), Ts));
-
-        Assert.Contains("Infinity", ex.Message);
-    }
-
-    [Fact]
-    public void MetricLine_NegativeInfinity_Throws()
-    {
-        Assert.Throws<ArgumentException>(() =>
-            PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), Ts));
+        Assert.Equal("m +Inf 1690000000000", PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), Ts));
+        Assert.Equal("m -Inf 1690000000000", PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), Ts));
     }
 
     [Fact]
@@ -101,6 +94,18 @@ public sealed class PrometheusParserGeneratorTests
         var labels = new Dictionary<string, string> { ["9x"] = "v" };
 
         Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("m", 1.0, labels, Ts));
+    }
+
+    [Fact]
+    // «:» в имени лейбла: у Fennel метрика и лейбл — один pname, парсер агента
+    // принимает «:» в лейблах, генератору паритет с парсером обязателен
+    public void MetricLine_LabelNameWithColon_IsAllowed()
+    {
+        var labels = new Dictionary<string, string> { ["a:b"] = "1" };
+
+        var line = PrometheusParser.MetricLine("m", 1.0, labels, Ts);
+
+        Assert.Equal("m{a:b=\"1\"} 1 1690000000000", line);
     }
 
     [Fact]

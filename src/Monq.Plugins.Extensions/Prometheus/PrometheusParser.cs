@@ -34,12 +34,14 @@ namespace Monq.Plugins.Prometheus;
 //
 // Контракт формата:
 //   name{label="value",...} value [timestamp_millis]
-//   - имя метрики:  [a-zA-Z_:][a-zA-Z0-9_:]*
-//   - имя лейбла:   [a-zA-Z_][a-zA-Z0-9_]*
+//   - имя метрики и лейбла: [a-zA-Z_:][a-zA-Z0-9_:]* (у Fennel и то, и другое —
+//     один и тот же pname; парсер агента принимает «:» и в именах лейблов)
 //   - значение лейбла: в кавычках, экранированы \ " \n \r \t
-//   - значение метрики: float в инвариантной культуре; NaN рендерится как «Nan»
-//     (единственная форма, которую разбирает парсер агента); ±Infinity не представляются
-//   - timestamp: целые миллисекунды Unix-времени
+//   - значение метрики: float в инвариантной культуре; NaN рендерится как «Nan»,
+//     ±Infinity как «+Inf»/«-Inf» — все эти формы парсер агента (Fennel pfloat,
+//     case-fold) принимает обратно
+//   - timestamp: целые миллисекунды Unix-времени в диапазоне DateTimeOffset
+//     (вне диапазона строка пропускается, исключение не бросается)
 //
 // ОТЛИЧИЯ ПАРСЕРА ОТ FENNEL (по итогам сравнения с github.com/dburriss/fennel).
 //
@@ -47,8 +49,10 @@ namespace Monq.Plugins.Prometheus;
 // (k8smetricsdataflow / metricsfromstatictargets) теряли эти метрики молча.
 // Мы принимаем, и при повторной генерации через MetricLine строка нормализуется,
 // поэтому парсер агента (тот же Fennel) никогда не ломается:
-//   - «NaN» (форма спецификации) -> null-значение (Fennel понимает только «Nan»);
-//     при ре-эмитах плагин подставляет 0, как делали legacy (metric.MetricValue ?? 0);
+//   - NaN: Fennel (pfloat, case-fold) принимает «nan» в любом регистре и возвращает
+//     double.NaN; мы принимаем только точные токены «Nan»/«NaN» и отдаём null вместо
+//     double.NaN, чтобы плагин подставлял 0, как делали legacy
+//     (metric.MetricValue ?? 0);
 //   - хвостовая запятая в лейблах {a="1",} (Fennel падает; metricsfromstatictargets
 //     обходил это хак-заменой ",}" -> "}", которая резала и внутри кавычек —
 //     т.е. портила значение лейбла вида "x,}"); при ре-эмите запятая исчезает;
@@ -75,7 +79,16 @@ public static class PrometheusParser
     // ДЫРА (см. заголовок): regex допускают имена в 1 символ — ровно те, которые не примет
     // парсер агента (Fennel manyChars2 требует >= 2). Такую строку ре-эмитить нельзя.
     static readonly Regex MetricNameRegex = new("^[a-zA-Z_:][a-zA-Z0-9_:]*$");
-    static readonly Regex LabelNameRegex = new("^[a-zA-Z_][a-zA-Z0-9_]*$");
+    // Те же классы, что и MetricNameRegex: у Fennel и метрика, и лейбл — один и тот же
+    // pname, парсер агента принимает «:» и в именах лейблов (паритет генератора).
+    static readonly Regex LabelNameRegex = new("^[a-zA-Z_:][a-zA-Z0-9_:]*$");
+
+    // Границы валидного timestamp (Unix-миллисекунды) — ровно диапазон DateTimeOffset;
+    // long влезает и дальше, без проверки FromUnixTimeMilliseconds бросит исключение.
+    // Границы вычисляются из BCL, а не захардкожены: если .NET поменяет диапазон
+    // дат (сейчас 0001-01-01..9999-12-31), код подстроится сам
+    static readonly long MinTimestampMs = DateTimeOffset.MinValue.ToUnixTimeMilliseconds();
+    static readonly long MaxTimestampMs = DateTimeOffset.MaxValue.ToUnixTimeMilliseconds();
 
     /// <summary>
     /// Рендерит строку метрики: name{labels} value timestamp_millis.
@@ -148,8 +161,13 @@ public static class PrometheusParser
         if (double.IsNaN(value))
             return "Nan";
 
-        if (double.IsPositiveInfinity(value) || double.IsNegativeInfinity(value))
-            throw new ArgumentException("Infinity is not a representable Prometheus metric value.", nameof(value));
+        // Формы спецификации; Fennel (pfloat, case-fold) принимает их обратно —
+        // круг ре-эмита замыкается (корпус: something_weird … +Inf)
+        if (double.IsPositiveInfinity(value))
+            return "+Inf";
+
+        if (double.IsNegativeInfinity(value))
+            return "-Inf";
 
         return value.ToString(CultureInfo.InvariantCulture);
     }
@@ -429,6 +447,12 @@ public static class PrometheusParser
 
         var token = line[tokenStart..pos];
         if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ms))
+            return false;
+
+        // Проверка диапазона: int64 влезает шире диапазона DateTimeOffset, и
+        // FromUnixTimeMilliseconds на нём бросает — такая строка невалидна,
+        // а не весь текст (контракт: терпимо, без исключений)
+        if (ms < MinTimestampMs || ms > MaxTimestampMs)
             return false;
 
         timestamp = DateTimeOffset.FromUnixTimeMilliseconds(ms);
