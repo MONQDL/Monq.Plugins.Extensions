@@ -19,7 +19,7 @@ namespace Monq.Plugins.Extensions.Prometheus;
 // Supported line format:
 //   name{label="value",...} value [timestamp_millis]
 //   - metric name: [a-zA-Z_:][a-zA-Z0-9_:]*;
-//   - label name: [a-zA-Z_][a-zA-Z0-9_]*;
+//   - label name: [a-zA-Z_:][a-zA-Z0-9_:]*;
 //   - label value: quoted, with \, ", \n, \r, and \t escapes;
 //   - metric value: an invariant-culture floating-point value, +Inf, -Inf, Nan, or NaN;
 //   - timestamp: optional Unix time in milliseconds within the DateTimeOffset range.
@@ -27,7 +27,7 @@ namespace Monq.Plugins.Extensions.Prometheus;
 // The parser deliberately accepts forms found in external exporters and normalizes them when
 // rendered: empty label blocks, trailing label commas, surrounding whitespace, and both Nan and
 // NaN spellings. Nan and NaN are represented by a null Value. MetricLine renders NaN as Nan and
-// rejects positive and negative infinity.
+// infinities as +Inf and -Inf.
 //
 // Parsing avoids temporary strings for numeric values, timestamps, and individual document lines.
 // Names and label values are materialized because ParsedMetric retains them. Unescaped label
@@ -44,8 +44,11 @@ public static partial class PrometheusParser
     [GeneratedRegex("^[a-zA-Z_:][a-zA-Z0-9_:]*$")]
     private static partial Regex MetricNameRegex();
 
-    [GeneratedRegex("^[a-zA-Z_][a-zA-Z0-9_]*$")]
+    [GeneratedRegex("^[a-zA-Z_:][a-zA-Z0-9_:]*$")]
     private static partial Regex LabelNameRegex();
+
+    static readonly long _minTimestampMs = DateTimeOffset.MinValue.ToUnixTimeMilliseconds();
+    static readonly long _maxTimestampMs = DateTimeOffset.MaxValue.ToUnixTimeMilliseconds();
 
     /// <summary>
     /// Renders a metric as <c>name{labels} value timestamp_millis</c>.
@@ -55,10 +58,7 @@ public static partial class PrometheusParser
     /// <param name="labels">The labels to render in enumeration order.</param>
     /// <param name="timestamp">The sample timestamp.</param>
     /// <returns>The rendered metric line.</returns>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="name"/> or a label name is invalid, or <paramref name="value"/> is
-    /// positive or negative infinity.
-    /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="name"/> or a label name is invalid.</exception>
     public static string MetricLine(
         string name,
         double value,
@@ -135,8 +135,13 @@ public static partial class PrometheusParser
         if (double.IsNaN(value))
             return "Nan";
 
-        if (double.IsPositiveInfinity(value) || double.IsNegativeInfinity(value))
-            throw new ArgumentException("Infinity is not a representable Prometheus metric value.", nameof(value));
+        // Формы спецификации; Fennel (pfloat, case-fold) принимает их обратно —
+        // круг ре-эмита замыкается (корпус: something_weird … +Inf)
+        if (double.IsPositiveInfinity(value))
+            return "+Inf";
+
+        if (double.IsNegativeInfinity(value))
+            return "-Inf";
 
         return value.ToString(CultureInfo.InvariantCulture);
     }
@@ -149,8 +154,17 @@ public static partial class PrometheusParser
             return;
         }
 
-        if (double.IsPositiveInfinity(value) || double.IsNegativeInfinity(value))
-            throw new ArgumentException("Infinity is not a representable Prometheus metric value.", nameof(value));
+        if (double.IsPositiveInfinity(value))
+        {
+            sb.Append("+Inf");
+            return;
+        }
+
+        if (double.IsNegativeInfinity(value))
+        {
+            sb.Append("-Inf");
+            return;
+        }
 
         Span<char> buffer = stackalloc char[FormattedDoubleBufferLength];
         if (!value.TryFormat(buffer, out var charsWritten, provider: CultureInfo.InvariantCulture))
@@ -169,9 +183,6 @@ public static partial class PrometheusParser
     /// <returns>
     /// Parsed metrics in source order. HELP, TYPE, comment, blank, and malformed lines are skipped.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// A metric contains a timestamp outside the range supported by <see cref="DateTimeOffset"/>.
-    /// </exception>
     public static IReadOnlyList<ParsedMetric> ParseText(string? text)
     {
         var metrics = new List<ParsedMetric>();
@@ -210,9 +221,6 @@ public static partial class PrometheusParser
     /// <see langword="true"/> for a valid metric line; otherwise, <see langword="false"/> for
     /// HELP, TYPE, comment, blank, or malformed input.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// The timestamp is outside the range supported by <see cref="DateTimeOffset"/>.
-    /// </exception>
     public static bool TryParseLine(string? line, [NotNullWhen(true)] out ParsedMetric? metric)
     {
         metric = null;
@@ -447,6 +455,12 @@ public static partial class PrometheusParser
 
         var token = line[tokenStart..pos];
         if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms))
+            return false;
+
+        // Проверка диапазона: int64 влезает шире диапазона DateTimeOffset, и
+        // FromUnixTimeMilliseconds на нём бросает — такая строка невалидна,
+        // а не весь текст (контракт: терпимо, без исключений)
+        if (ms < _minTimestampMs || ms > _maxTimestampMs)
             return false;
 
         timestamp = DateTimeOffset.FromUnixTimeMilliseconds(ms);

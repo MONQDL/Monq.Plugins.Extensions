@@ -111,7 +111,8 @@ public sealed class PrometheusParserTests
     [Fact]
     public void TryParseLine_NaNIsAccepted()
     {
-        // Fennel понимает только «Nan»; спецификация Prometheus — «NaN»
+        // Fennel (case-fold) принимает и «NaN» — разница в результате: Fennel
+        // возвращает double.NaN, мы отдаём null (см. заголовок PrometheusParser)
         var ok = PrometheusParser.TryParseLine("metric_with_nan NaN", out var m);
 
         Assert.True(ok);
@@ -172,9 +173,38 @@ public sealed class PrometheusParserTests
         Assert.False(PrometheusParser.TryParseLine("m{a=\"x\\y\"} 1", out _));         // неизвестный эскейп
         Assert.False(PrometheusParser.TryParseLine("m 1 abc", out _));                 // мусор после значения
         Assert.False(PrometheusParser.TryParseLine("m 1 2.5", out _));                 // не-cелый timestamp
-        Assert.False(PrometheusParser.TryParseLine("m 1 99999999999999999999", out _)); // переполнение timestamp
+        Assert.False(PrometheusParser.TryParseLine("m 1 99999999999999999999", out _)); // переполнение timestamp (int64)
+        Assert.False(PrometheusParser.TryParseLine("m 1 253402300800000", out _));      // timestamp выше DateTimeOffset.MaxValue
+        Assert.False(PrometheusParser.TryParseLine("m 1 -62135596800001", out _));     // timestamp ниже DateTimeOffset.MinValue
         Assert.False(PrometheusParser.TryParseLine("m 1.5 2 3", out _));               // два timestamp
         Assert.False(PrometheusParser.TryParseLine("m .", out _));                     // битое значение
+    }
+
+    [Fact]
+    // Границы диапазона: DateTimeOffset.MinValue/MaxValue сами валидны (off-by-one)
+    public void TryParseLine_TimestampAtDateTimeOffsetBoundaries_Accepted()
+    {
+        Assert.True(PrometheusParser.TryParseLine("m 1 -62135596800000", out var min));
+        Assert.Equal(DateTimeOffset.MinValue, min!.Timestamp);
+
+        // Миллисекундная верхняя граница строго не равна MaxValue: дробная часть
+        // MaxValue (.9999999 с) обрубается до .999 с — проверяем round-trip в мс
+        Assert.True(PrometheusParser.TryParseLine("m 1 253402300799999", out var max));
+        Assert.Equal(253402300799999, max!.Timestamp!.Value.ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    // «:» в имени лейбла: Fennel (pname) принимает его и в парсере, и в агенте —
+    // канонический флоу «скрап -> докинуть лейбл -> ре-эмит» не должен падать
+    public void TryParseLine_LabelNameWithColon_RoundTripThroughGenerator()
+    {
+        Assert.True(PrometheusParser.TryParseLine("m{a:b=\"1\"} 1", out var parsed));
+
+        var regenerated = PrometheusParser.MetricLine(parsed!.Name, parsed.Value!.Value, parsed.Labels, _timestamp);
+
+        Assert.Equal("m{a:b=\"1\"} 1 1690000000000", regenerated);
+        Assert.True(PrometheusParser.TryParseLine(regenerated, out var m2));
+        Assert.Equal(parsed.Labels, m2!.Labels);
     }
 
     [Fact]
