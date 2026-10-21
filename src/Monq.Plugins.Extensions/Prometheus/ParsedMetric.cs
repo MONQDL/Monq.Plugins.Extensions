@@ -1,13 +1,19 @@
-namespace Monq.Plugins.Prometheus;
+namespace Monq.Plugins.Extensions.Prometheus;
 
 /// <summary>
-/// Результат разбора одной строки метрики в текстовом формате Prometheus.
-/// <see cref="Value"/> равно <c>null</c> для «Nan»/«NaN»;
-/// <see cref="Timestamp"/> равно <c>null</c>, если в строке нет таймстемпа.
-/// <see cref="Labels"/> — мутабельный словарь (как <c>Metric.Labels</c> у Fennel):
-/// после разбора можно добавлять, заменять и удалять лейблы, а дальше прокидывать
-/// метрику в <see cref="PrometheusParser.MetricLine"/> напрямую.
+/// Represents a metric parsed from the Prometheus text exposition format.
 /// </summary>
+/// <param name="Name">The metric name.</param>
+/// <param name="Labels">
+/// The mutable label collection. Labels can be added, replaced, or removed before the metric is
+/// rendered again.
+/// </param>
+/// <param name="Value">
+/// The metric value, or <see langword="null"/> when the source value is <c>Nan</c> or <c>NaN</c>.
+/// </param>
+/// <param name="Timestamp">
+/// The sample timestamp, or <see langword="null"/> when the source line has no timestamp.
+/// </param>
 public sealed record ParsedMetric(
     string Name,
     Dictionary<string, string> Labels,

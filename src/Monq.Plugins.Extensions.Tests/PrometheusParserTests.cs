@@ -1,11 +1,11 @@
-using Monq.Plugins.Prometheus;
+using Monq.Plugins.Extensions.Prometheus;
 using Xunit;
 
 namespace Monq.Plugins.Extensions.Tests;
 
 public sealed class PrometheusParserTests
 {
-    static readonly DateTimeOffset Ts = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
+    static readonly DateTimeOffset _timestamp = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
 
     // Векторы из тестового корпуса Fennel (CSharpApiTests / ParserTests) — якорь
     // паритетности: всё, что Fennel парсит, мы парсим в тот же результат.
@@ -263,7 +263,7 @@ public sealed class PrometheusParserTests
 
         Assert.Equal(new Dictionary<string, string> { ["a"] = "10", ["c"] = "3" }, m.Labels);
 
-        var line = PrometheusParser.MetricLine(m.Name, m.Value!.Value, m.Labels, Ts);
+        var line = PrometheusParser.MetricLine(m.Name, m.Value!.Value, m.Labels, _timestamp);
         Assert.Equal("m{a=\"10\",c=\"3\"} 3 1690000000000", line);
     }
 }

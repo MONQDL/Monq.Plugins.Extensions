@@ -1,11 +1,11 @@
-using Monq.Plugins.Prometheus;
+using Monq.Plugins.Extensions.Prometheus;
 using Xunit;
 
 namespace Monq.Plugins.Extensions.Tests;
 
 public sealed class PrometheusParserGeneratorTests
 {
-    static readonly DateTimeOffset Ts = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
+    static readonly DateTimeOffset _timestamp = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
 
     [Fact]
     // Ожидание взято из тестового корпуса Fennel (CSharpApiTests.MetricLine) —
@@ -22,7 +22,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_WithoutLabels()
     {
-        var line = PrometheusParser.MetricLine("metric_without_labels", 12.47, new Dictionary<string, string>(), Ts);
+        var line = PrometheusParser.MetricLine("metric_without_labels", 12.47, new Dictionary<string, string>(), _timestamp);
 
         Assert.Equal("metric_without_labels 12.47 1690000000000", line);
     }
@@ -30,7 +30,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_IntegerValue_HasNoDecimalPoint()
     {
-        var line = PrometheusParser.MetricLine("tcp_probe_success", 1.0, new Dictionary<string, string>(), Ts);
+        var line = PrometheusParser.MetricLine("tcp_probe_success", 1.0, new Dictionary<string, string>(), _timestamp);
 
         Assert.Equal("tcp_probe_success 1 1690000000000", line);
     }
@@ -46,7 +46,7 @@ public sealed class PrometheusParserGeneratorTests
             ["error"] = "Cannot find file:\n \"FILE.TXT\" ",
         };
 
-        var line = PrometheusParser.MetricLine("msdos_file_access_time_seconds", 1458255915.0, labels, Ts);
+        var line = PrometheusParser.MetricLine("msdos_file_access_time_seconds", 1458255915.0, labels, _timestamp);
 
         Assert.Equal(
             "msdos_file_access_time_seconds{path=\"C:\\\\DIR\\\\FILE.TXT\",error=\"Cannot find file:\\n \\\"FILE.TXT\\\" \"} 1458255915 1690000000000",
@@ -58,7 +58,7 @@ public sealed class PrometheusParserGeneratorTests
     {
         var labels = new Dictionary<string, string> { ["instance"] = "example.com", ["port"] = "8080", ["custom"] = "v" };
 
-        var line = PrometheusParser.MetricLine("m", 0.5, labels, Ts);
+        var line = PrometheusParser.MetricLine("m", 0.5, labels, _timestamp);
 
         Assert.Equal("m{instance=\"example.com\",port=\"8080\",custom=\"v\"} 0.5 1690000000000", line);
     }
@@ -66,7 +66,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_Nan_RendersNan()
     {
-        var line = PrometheusParser.MetricLine("m", double.NaN, new Dictionary<string, string>(), Ts);
+        var line = PrometheusParser.MetricLine("m", double.NaN, new Dictionary<string, string>(), _timestamp);
 
         Assert.Equal("m Nan 1690000000000", line);
     }
@@ -75,7 +75,7 @@ public sealed class PrometheusParserGeneratorTests
     public void MetricLine_PositiveInfinity_Throws()
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), Ts));
+            PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), _timestamp));
 
         Assert.Contains("Infinity", ex.Message);
     }
@@ -84,15 +84,15 @@ public sealed class PrometheusParserGeneratorTests
     public void MetricLine_NegativeInfinity_Throws()
     {
         Assert.Throws<ArgumentException>(() =>
-            PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), Ts));
+            PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), _timestamp));
     }
 
     [Fact]
     public void MetricLine_InvalidMetricName_Throws()
     {
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("1bad", 1.0, new Dictionary<string, string>(), Ts));
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("bad-name", 1.0, new Dictionary<string, string>(), Ts));
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("", 1.0, new Dictionary<string, string>(), Ts));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("1bad", 1.0, new Dictionary<string, string>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("bad-name", 1.0, new Dictionary<string, string>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("", 1.0, new Dictionary<string, string>(), _timestamp));
     }
 
     [Fact]
@@ -100,7 +100,7 @@ public sealed class PrometheusParserGeneratorTests
     {
         var labels = new Dictionary<string, string> { ["9x"] = "v" };
 
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("m", 1.0, labels, Ts));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("m", 1.0, labels, _timestamp));
     }
 
     [Fact]

@@ -1,4 +1,4 @@
-using Monq.Plugins.Prometheus;
+using Monq.Plugins.Extensions.Prometheus;
 using Xunit;
 
 namespace Monq.Plugins.Extensions.Tests;

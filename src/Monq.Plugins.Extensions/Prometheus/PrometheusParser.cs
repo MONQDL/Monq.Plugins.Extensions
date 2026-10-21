@@ -3,90 +3,66 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Monq.Plugins.Prometheus;
+namespace Monq.Plugins.Extensions.Prometheus;
 
-// Форматтер и парсер строк метрик в текстовом формате Prometheus (exposition format).
-// Самодостаточен, без внешних зависимостей: задуман как общее решение для плагинов —
-//   * «генератор»: плагин выбрасывает метрики в артефакт «metrics» (агент парсит
-//     эти строки своим парсером Fennel, поэтому генерация ниже — контракт);
-//   * «парсер»: плагин скрапит чужой /metrics (ParseText/TryParseLine) и докидывает
-//     свои лейблы в распарсенные метрики (ParsedMetric.Labels) — терпимо, без
-//     исключений, в стиле, в котором это делали старые плагины поверх Fennel
-//     (битые строки прокидываются, а не роняют задачу).
+// Parser and formatter for the Prometheus text exposition format. The implementation is
+// self-contained and supports both producers of metrics artifacts and scrapers that read a
+// /metrics response, enrich parsed metrics with custom labels, and render them again.
 //
-// ПАРИТЕТ API С FENNEL (github.com/dburriss/fennel, фасад CSharp.fs) — удобство,
-// которым пользовались старые плагины:
-//   - ParseText(text) — парсит целый текст /metrics одним вызовом (у Fennel —
-//     Prometheus.ParseText). Терпимый: не-метрические (HELP/TYPE/комментарии/
-//     пустые) и некорректные строки пропускаются, исключение не бросается.
-//     Прогон — один проход по тексту без промежуточных копий строк построчно;
-//   - ParsedMetric.Labels — мутабельный словарь (у Fennel — Metric.Labels :
-//     IDictionary<string,string>): после разбора лейблы можно добавлять,
-//     заменять и удалять, дальше метрика идёт в MetricLine напрямую;
-//   - TryParseLine / MetricLine — терпимые аналоги Fennel'овских
-//     Prometheus.ParseLine / Prometheus.Metric.
+// Supported API:
+//   - ParseText parses metric lines in source order and skips HELP, TYPE, comments, blank lines,
+//     and malformed lines;
+//   - TryParseLine parses one metric line and returns false for unsupported syntax;
+//   - ParsedMetric.Labels is mutable so callers can add, replace, or remove labels;
+//   - MetricLine validates names and renders a normalized metric line.
 //
-// Аллокации на строку метрики намеренно минимальны: значение и timestamp читаются
-// из строки напрямую, без нарезки токенов в новые строки; значение лейбла копируется
-// ровно один раз — без эскейпов это слайс исходной строки, с эскейпами —
-// StringBuilder; без лейблов промежуточные коллекции не создаются, а дубликаты
-// имён ловит Dictionary.TryAdd (отдельный HashSet не нужен).
-//
-// Контракт формата:
+// Supported line format:
 //   name{label="value",...} value [timestamp_millis]
-//   - имя метрики:  [a-zA-Z_:][a-zA-Z0-9_:]*
-//   - имя лейбла:   [a-zA-Z_][a-zA-Z0-9_]*
-//   - значение лейбла: в кавычках, экранированы \ " \n \r \t
-//   - значение метрики: float в инвариантной культуре; NaN рендерится как «Nan»
-//     (единственная форма, которую разбирает парсер агента); ±Infinity не представляются
-//   - timestamp: целые миллисекунды Unix-времени
+//   - metric name: [a-zA-Z_:][a-zA-Z0-9_:]*;
+//   - label name: [a-zA-Z_][a-zA-Z0-9_]*;
+//   - label value: quoted, with \, ", \n, \r, and \t escapes;
+//   - metric value: an invariant-culture floating-point value, +Inf, -Inf, Nan, or NaN;
+//   - timestamp: optional Unix time in milliseconds within the DateTimeOffset range.
 //
-// ОТЛИЧИЯ ПАРСЕРА ОТ FENNEL (по итогам сравнения с github.com/dburriss/fennel).
+// The parser deliberately accepts forms found in external exporters and normalizes them when
+// rendered: empty label blocks, trailing label commas, surrounding whitespace, and both Nan and
+// NaN spellings. Nan and NaN are represented by a null Value. MetricLine renders NaN as Nan and
+// rejects positive and negative infinity.
 //
-// Безопасная терпимость — Fennel такие строки отбрасывал, и старые скрейперы
-// (k8smetricsdataflow / metricsfromstatictargets) теряли эти метрики молча.
-// Мы принимаем, и при повторной генерации через MetricLine строка нормализуется,
-// поэтому парсер агента (тот же Fennel) никогда не ломается:
-//   - «NaN» (форма спецификации) -> null-значение (Fennel понимает только «Nan»);
-//     при ре-эмитах плагин подставляет 0, как делали legacy (metric.MetricValue ?? 0);
-//   - хвостовая запятая в лейблах {a="1",} (Fennel падает; metricsfromstatictargets
-//     обходил это хак-заменой ",}" -> "}", которая резала и внутри кавычек —
-//     т.е. портила значение лейбла вида "x,}"); при ре-эмите запятая исчезает;
-//   - пустой блок лейблов {} (Fennel невалиден — sepBy требует >= 1 пары);
-//     при ре-эмите генерируется строка вообще без скобок;
-//   - пробельные хвосты / '\r' / пробелы вокруг '=' в лейблах (Fennel: FParsec run
-//     требует полного потребления строки, любой хвост = строка невалидна);
-//     при ре-эмите всё обрезается.
-//
-// ИЗВЕСТНАЯ ДЫРА (риск, а не терпимость): имена метрик и лейблов в 1 символ.
-//   Fennel (manyChars2) требует >= 2 символа; мы принимаем 1. Для скрейперов,
-//   которые строят gRPC TimeSeries напрямую, это безвредно — агент текст не видит.
-//   НО если плагин скрапит строку и ПЕРЕИЗДАЁТ её текстом через MetricLine, то
-//   парсер агента (Fennel) эту строку отвергнёт, и ParseText в агенте выбросит
-//   исключение на ВЕСЬ артефакт. Legacy-плагин на Fennel создать такую строку
-//   не мог (его парсер отбрасывал 1-символьные имена ещё на этапе скрапа).
-//   Вывод: либо переиздающий плагин сам отфильтровывает имена короче 2 символов,
-//   либо парсер/генератор ужесточить до >= 2 символов (точки ниже помечены «ДЫРА»).
+// Parsing avoids temporary strings for numeric values, timestamps, and individual document lines.
+// Names and label values are materialized because ParsedMetric retains them. Unescaped label
+// values are copied directly; escaped values are decoded with a StringBuilder. Dictionary.TryAdd
+// detects duplicate label names without a separate HashSet.
 /// <summary>
-/// Renders and parses metric lines in the Prometheus text (exposition) format.
+/// Parses and renders metrics in the Prometheus text exposition format.
 /// </summary>
-public static class PrometheusParser
+public static partial class PrometheusParser
 {
-    // ДЫРА (см. заголовок): regex допускают имена в 1 символ — ровно те, которые не примет
-    // парсер агента (Fennel manyChars2 требует >= 2). Такую строку ре-эмитить нельзя.
-    static readonly Regex MetricNameRegex = new("^[a-zA-Z_:][a-zA-Z0-9_:]*$");
-    static readonly Regex LabelNameRegex = new("^[a-zA-Z_][a-zA-Z0-9_]*$");
+    [GeneratedRegex("^[a-zA-Z_:][a-zA-Z0-9_:]*$")]
+    private static partial Regex MetricNameRegex();
+
+    [GeneratedRegex("^[a-zA-Z_][a-zA-Z0-9_]*$")]
+    private static partial Regex LabelNameRegex();
 
     /// <summary>
-    /// Рендерит строку метрики: name{labels} value timestamp_millis.
+    /// Renders a metric as <c>name{labels} value timestamp_millis</c>.
     /// </summary>
+    /// <param name="name">The metric name.</param>
+    /// <param name="value">The metric value.</param>
+    /// <param name="labels">The labels to render in enumeration order.</param>
+    /// <param name="timestamp">The sample timestamp.</param>
+    /// <returns>The rendered metric line.</returns>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="name"/> or a label name is invalid, or <paramref name="value"/> is
+    /// positive or negative infinity.
+    /// </exception>
     public static string MetricLine(
         string name,
         double value,
         IReadOnlyDictionary<string, string> labels,
         DateTimeOffset timestamp)
     {
-        if (!MetricNameRegex.IsMatch(name))
+        if (!MetricNameRegex().IsMatch(name))
             throw new ArgumentException($"Invalid Prometheus metric name: '{name}'.", nameof(name));
 
         return new StringBuilder()
@@ -105,7 +81,7 @@ public static class PrometheusParser
         var first = true;
         foreach (var (key, val) in labels)
         {
-            if (!LabelNameRegex.IsMatch(key))
+            if (!LabelNameRegex().IsMatch(key))
                 throw new ArgumentException($"Invalid Prometheus label name: '{key}'.", nameof(key));
 
             if (!first)
@@ -155,11 +131,15 @@ public static class PrometheusParser
     }
 
     /// <summary>
-    /// Парсит целый текст (например, ответ /metrics) — все строки метрик одним
-    /// вызовом. Терпимый, как <see cref="TryParseLine(string?, out ParsedMetric?)"/>: не-метрические
-    /// (HELP/TYPE/комментарии/пустые) и некорректные строки пропускаются,
-    /// исключение не бросается.
+    /// Parses all valid metric lines from Prometheus text, such as a <c>/metrics</c> response.
     /// </summary>
+    /// <param name="text">The text to parse. A <see langword="null"/> or empty value produces an empty result.</param>
+    /// <returns>
+    /// Parsed metrics in source order. HELP, TYPE, comment, blank, and malformed lines are skipped.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// A metric contains a timestamp outside the range supported by <see cref="DateTimeOffset"/>.
+    /// </exception>
     public static IReadOnlyList<ParsedMetric> ParseText(string? text)
     {
         var metrics = new List<ParsedMetric>();
@@ -168,8 +148,8 @@ public static class PrometheusParser
 
         // Один проход по тексту; строки режутся индексами, без Split и
         // промежуточных строк (TryParseLine принимает span напрямую).
-        int start = 0;
-        for (int i = 0; i < text.Length; i++)
+        var start = 0;
+        for (var i = 0; i < text.Length; i++)
         {
             if (text[i] != '\n')
                 continue;
@@ -187,9 +167,20 @@ public static class PrometheusParser
     }
 
     /// <summary>
-    /// Парсит одну строку метрики. Терпимый: для не-метрических (HELP/TYPE/комментарии/
-    /// пустые) и некорректных строк возвращает <c>false</c> вместо броска исключения.
+    /// Attempts to parse one Prometheus metric line.
     /// </summary>
+    /// <param name="line">The line to parse.</param>
+    /// <param name="metric">
+    /// When this method returns <see langword="true"/>, contains the parsed metric; otherwise,
+    /// <see langword="null"/>.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> for a valid metric line; otherwise, <see langword="false"/> for
+    /// HELP, TYPE, comment, blank, or malformed input.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The timestamp is outside the range supported by <see cref="DateTimeOffset"/>.
+    /// </exception>
     public static bool TryParseLine(string? line, [NotNullWhen(true)] out ParsedMetric? metric)
     {
         metric = null;
@@ -202,18 +193,16 @@ public static class PrometheusParser
     static bool TryParseLine(ReadOnlySpan<char> line, [NotNullWhen(true)] out ParsedMetric? metric)
     {
         metric = null;
-        int pos = 0;
+        var pos = 0;
 
         // 1) Имя метрики
         SkipWhitespace(line, ref pos);
         if (pos >= line.Length || !IsNameStartChar(line[pos]))
             return false;
-        int nameStart = pos;
+        var nameStart = pos;
         while (pos < line.Length && IsNameChar(line[pos]))
             pos++;
         var name = line[nameStart..pos].ToString();
-        // ДЫРА (см. заголовок): принимаем имя в 1 символ; Fennel (manyChars2) требует >= 2.
-
         // 2) Необязательный блок лейблов.
         // Словарь и собирает пары, и отбраковывает дубликаты имён (TryAdd);
         // порядок вставки сохранён, поэтому ре-эмит воспроизводит порядок лейблов.
@@ -227,7 +216,7 @@ public static class PrometheusParser
 
         // 3) Значение (обязательное)
         SkipWhitespace(line, ref pos);
-        if (pos >= line.Length || !TryParseValue(line, ref pos, out double? value))
+        if (pos >= line.Length || !TryParseValue(line, ref pos, out var value))
             return false;
 
         // 4) Необязательный timestamp
@@ -241,7 +230,7 @@ public static class PrometheusParser
         if (pos != line.Length)
             return false;
 
-        metric = new ParsedMetric(name, labels ?? new Dictionary<string, string>(), value, timestamp);
+        metric = new ParsedMetric(name, labels ?? [], value, timestamp);
         return true;
     }
 
@@ -264,12 +253,10 @@ public static class PrometheusParser
             // Имя лейбла
             if (pos >= line.Length || !IsNameStartChar(line[pos]))
                 return false;
-            int nameStart = pos;
+            var nameStart = pos;
             while (pos < line.Length && IsNameChar(line[pos]))
                 pos++;
             var labelName = line[nameStart..pos].ToString();
-            // ДЫРА (см. заголовок): принимаем имя лейбла в 1 символ; Fennel требует >= 2.
-
             // '='
             SkipWhitespace(line, ref pos);
             if (pos >= line.Length || line[pos] != '=')
@@ -283,11 +270,10 @@ public static class PrometheusParser
             pos++;
 
             // Значение лейбла до закрывающей '"', с разэскейпингом
-            if (!TryParseLabelValue(line, ref pos, out string labelValue))
+            if (!TryParseLabelValue(line, ref pos, out var labelValue))
                 return false;
 
-            // Дубликаты имён лейблов отвергаем: обёртка Fennel на них падает
-            // (dict с дубликатами), а старые плагины такие строки прокидывают.
+            // Duplicate label names are ambiguous and therefore rejected.
             labels ??= new Dictionary<string, string>(4);
             if (!labels.TryAdd(labelName, labelValue))
                 return false;
@@ -314,20 +300,20 @@ public static class PrometheusParser
     {
         value = string.Empty;
         // pos указывает на первый символ после открывающей '"'
-        int valueStart = pos;
-        int valueEnd = -1;
-        bool hasEscape = false;
+        var valueStart = pos;
+        var valueEnd = -1;
+        var hasEscape = false;
 
         while (pos < line.Length)
         {
-            char c = line[pos];
+            var c = line[pos];
             if (c == '\\')
             {
                 pos++;
                 if (pos >= line.Length)
                     return false; // «висячий» '\' в конце строки
-                char next = line[pos];
-                if (next != 'n' && next != 'r' && next != 't' && next != '\\' && next != '"')
+                var next = line[pos];
+                if (next is not ('n' or 'r' or 't' or '\\' or '"'))
                     return false;
                 pos++;
                 hasEscape = true;
@@ -359,15 +345,15 @@ public static class PrometheusParser
         }
 
         var sb = new StringBuilder(valueEnd - valueStart);
-        for (int i = valueStart; i < valueEnd; i++)
+        for (var i = valueStart; i < valueEnd; i++)
         {
-            char c = line[i];
+            var c = line[i];
             if (c != '\\')
             {
                 sb.Append(c);
                 continue;
             }
-            char next = line[++i];
+            var next = line[++i];
             sb.Append(next switch
             {
                 'n' => '\n',
@@ -389,7 +375,7 @@ public static class PrometheusParser
         // Токен до следующего пробела (пробел внутри значений здесь невозможен:
         // блок лейблов, если был, уже потреблён выше). Токен не режется в строку —
         // сравнивается и парсится span'ом.
-        int tokenStart = pos;
+        var tokenStart = pos;
         while (pos < line.Length && !char.IsWhiteSpace(line[pos]))
             pos++;
         if (pos == tokenStart)
@@ -408,7 +394,7 @@ public static class PrometheusParser
         }
         if (token.SequenceEqual("NaN") || token.SequenceEqual("Nan"))
             return true; // value остаётся null
-        if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out double result))
+        if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var result))
         {
             value = result;
             return true;
@@ -421,14 +407,14 @@ public static class PrometheusParser
     {
         timestamp = null;
 
-        int tokenStart = pos;
+        var tokenStart = pos;
         while (pos < line.Length && !char.IsWhiteSpace(line[pos]))
             pos++;
         if (pos == tokenStart)
             return false;
 
         var token = line[tokenStart..pos];
-        if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ms))
+        if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms))
             return false;
 
         timestamp = DateTimeOffset.FromUnixTimeMilliseconds(ms);
@@ -442,8 +428,8 @@ public static class PrometheusParser
     }
 
     static bool IsNameStartChar(char c) =>
-        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':';
+        c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or '_' or ':';
 
     static bool IsNameChar(char c) =>
-        IsNameStartChar(c) || (c >= '0' && c <= '9');
+        IsNameStartChar(c) || c is >= '0' and <= '9';
 }
