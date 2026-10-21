@@ -1,14 +1,13 @@
-using Monq.Plugins.Prometheus;
+using Monq.Plugins.Extensions.Prometheus;
 using Xunit;
 
 namespace Monq.Plugins.Extensions.Tests;
 
 public sealed class PrometheusParserTests
 {
-    static readonly DateTimeOffset Ts = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
+    static readonly DateTimeOffset _timestamp = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
 
-    // Векторы из тестового корпуса Fennel (CSharpApiTests / ParserTests) — якорь
-    // паритетности: всё, что Fennel парсит, мы парсим в тот же результат.
+    // Test vectors cover the supported Prometheus text exposition syntax.
 
     [Fact]
     public void TryParseLine_FullLine()
@@ -45,7 +44,7 @@ public sealed class PrometheusParserTests
     [Fact]
     public void TryParseLine_PositiveInf()
     {
-        // Строка из корпуса Prometheus (и ParserTests.fs): Fennel парсит её pfloat'ом
+        // Line from the Prometheus specification corpus.
         var ok = PrometheusParser.TryParseLine("something_weird{problem=\"division by zero\"} +Inf -3982045", out var m);
 
         Assert.True(ok);
@@ -63,7 +62,7 @@ public sealed class PrometheusParserTests
     }
 
     [Fact]
-    // Экранированные значения из корпуса Fennel (escaping in label values)
+    // Escaped values from the Prometheus parser corpus.
     public void TryParseLine_EscapesLabelValues()
     {
         var ok = PrometheusParser.TryParseLine(
@@ -106,13 +105,12 @@ public sealed class PrometheusParserTests
         Assert.Null(m!.Value);
     }
 
-    // Терпимость сверх Fennel (он такие строки отбрасывает — старые плагины теряли их молча)
+    // Additional accepted input forms that are normalized when rendered.
 
     [Fact]
     public void TryParseLine_NaNIsAccepted()
     {
-        // Fennel (case-fold) принимает и «NaN» — разница в результате: Fennel
-        // возвращает double.NaN, мы отдаём null (см. заголовок PrometheusParser)
+        // Both supported NaN spellings are represented by a null value.
         var ok = PrometheusParser.TryParseLine("metric_with_nan NaN", out var m);
 
         Assert.True(ok);
@@ -122,7 +120,7 @@ public sealed class PrometheusParserTests
     [Fact]
     public void TryParseLine_TrailingCommaInLabels()
     {
-        // Формат, из-за которого metricsfromstatictargets держал хак line.Replace(",}", "}")
+        // The form that made metricsfromstatictargets keep the line.Replace(",}", "}") hack
         var ok = PrometheusParser.TryParseLine("m{a=\"1\",} 2", out var m);
 
         Assert.True(ok);
@@ -141,14 +139,14 @@ public sealed class PrometheusParserTests
     [Fact]
     public void TryParseLine_NoSpaceBetweenLabelsAndValue()
     {
-        // Квирк Fennel: после '}' пробел не обязателен
+        // Whitespace after the label block is optional.
         var ok = PrometheusParser.TryParseLine("m{a=\"1\"}2", out var m);
 
         Assert.True(ok);
         Assert.Equal(2.0, m!.Value);
     }
 
-    // Не-метрические строки (HELP/TYPE/комментарии/пустые) — false, не исключение
+    // Non-metric lines (HELP/TYPE/comments/blank) return false, not an exception
 
     [Fact]
     public void TryParseLine_NonMetricLines_ReturnFalse()
@@ -161,46 +159,44 @@ public sealed class PrometheusParserTests
         Assert.False(PrometheusParser.TryParseLine(null, out _));
     }
 
-    // Некорректные строки — false, не исключение
+    // Malformed lines return false, not an exception
 
     [Fact]
     public void TryParseLine_Malformed_ReturnFalse()
     {
-        Assert.False(PrometheusParser.TryParseLine("1bad 1", out _));                 // имя с цифры
-        Assert.False(PrometheusParser.TryParseLine("m{9x=\"1\"} 1", out _));           // лейбл с цифры
-        Assert.False(PrometheusParser.TryParseLine("m{a=\"1\",a=\"2\"} 1", out _));    // дубликат лейблов
-        Assert.False(PrometheusParser.TryParseLine("m{a=\"unterminated", out _));      // незакрытая кавычка
-        Assert.False(PrometheusParser.TryParseLine("m{a=\"x\\y\"} 1", out _));         // неизвестный эскейп
-        Assert.False(PrometheusParser.TryParseLine("m 1 abc", out _));                 // мусор после значения
-        Assert.False(PrometheusParser.TryParseLine("m 1 2.5", out _));                 // не-cелый timestamp
-        Assert.False(PrometheusParser.TryParseLine("m 1 99999999999999999999", out _)); // переполнение timestamp (int64)
-        Assert.False(PrometheusParser.TryParseLine("m 1 253402300800000", out _));      // timestamp выше DateTimeOffset.MaxValue
-        Assert.False(PrometheusParser.TryParseLine("m 1 -62135596800001", out _));     // timestamp ниже DateTimeOffset.MinValue
-        Assert.False(PrometheusParser.TryParseLine("m 1.5 2 3", out _));               // два timestamp
-        Assert.False(PrometheusParser.TryParseLine("m .", out _));                     // битое значение
+        Assert.False(PrometheusParser.TryParseLine("1bad 1", out _));                   // name starting with a digit
+        Assert.False(PrometheusParser.TryParseLine("m{9x=\"1\"} 1", out _));            // label name starting with a digit
+        Assert.False(PrometheusParser.TryParseLine("m{a=\"1\",a=\"2\"} 1", out _));     // duplicate label names
+        Assert.False(PrometheusParser.TryParseLine("m{a=\"unterminated", out _));       // unterminated quote
+        Assert.False(PrometheusParser.TryParseLine("m{a=\"x\\y\"} 1", out _));          // unknown escape
+        Assert.False(PrometheusParser.TryParseLine("m 1 abc", out _));                  // garbage after the value
+        Assert.False(PrometheusParser.TryParseLine("m 1 2.5", out _));                  // fractional timestamp
+        Assert.False(PrometheusParser.TryParseLine("m 1 99999999999999999999", out _)); // timestamp overflow (beyond Int64)
+        Assert.False(PrometheusParser.TryParseLine("m 1 253402300800000", out _));      // timestamp above DateTimeOffset.MaxValue
+        Assert.False(PrometheusParser.TryParseLine("m 1 -62135596800001", out _));      // timestamp below DateTimeOffset.MinValue
+        Assert.False(PrometheusParser.TryParseLine("m 1.5 2 3", out _));                // two timestamps
+        Assert.False(PrometheusParser.TryParseLine("m .", out _));                      // broken value
     }
 
     [Fact]
-    // Границы диапазона: DateTimeOffset.MinValue/MaxValue сами валидны (off-by-one)
+    // DateTimeOffset.MinValue and the last complete millisecond of MaxValue remain valid.
     public void TryParseLine_TimestampAtDateTimeOffsetBoundaries_Accepted()
     {
         Assert.True(PrometheusParser.TryParseLine("m 1 -62135596800000", out var min));
         Assert.Equal(DateTimeOffset.MinValue, min!.Timestamp);
 
-        // Миллисекундная верхняя граница строго не равна MaxValue: дробная часть
-        // MaxValue (.9999999 с) обрубается до .999 с — проверяем round-trip в мс
+        // MaxValue has sub-millisecond ticks, so verify the upper boundary through milliseconds.
         Assert.True(PrometheusParser.TryParseLine("m 1 253402300799999", out var max));
         Assert.Equal(253402300799999, max!.Timestamp!.Value.ToUnixTimeMilliseconds());
     }
 
     [Fact]
-    // «:» в имени лейбла: Fennel (pname) принимает его и в парсере, и в агенте —
-    // канонический флоу «скрап -> докинуть лейбл -> ре-эмит» не должен падать
+    // A colon in a label name must survive the parse-enrich-render pipeline.
     public void TryParseLine_LabelNameWithColon_RoundTripThroughGenerator()
     {
         Assert.True(PrometheusParser.TryParseLine("m{a:b=\"1\"} 1", out var parsed));
 
-        var regenerated = PrometheusParser.MetricLine(parsed!.Name, parsed.Value!.Value, parsed.Labels, Ts);
+        var regenerated = PrometheusParser.MetricLine(parsed!.Name, parsed.Value!.Value, parsed.Labels, _timestamp);
 
         Assert.Equal("m{a:b=\"1\"} 1 1690000000000", regenerated);
         Assert.True(PrometheusParser.TryParseLine(regenerated, out var m2));
@@ -208,8 +204,7 @@ public sealed class PrometheusParserTests
     }
 
     [Fact]
-    // Полный корпус спецификации Prometheus (из ParserTests.fs): 20 метрик из 36 строк —
-    // ровно столько же, сколько подтверждает тест Fennel.
+    // The Prometheus specification corpus contains 20 metrics among its 36 lines.
     public void TryParseLine_PrometheusSpecCorpus()
     {
         const string corpus = """
@@ -263,8 +258,8 @@ public sealed class PrometheusParserTests
     }
 
     [Fact]
-    // Замыкание контура: парсинг -> генерация -> парсинг дают тот же результат.
-    // Мутабельные лейблы из распаршенной метрики уходят в MetricLine напрямую.
+    // Round trip: parsing, generating, and parsing again yield the same result.
+    // The mutable labels of the parsed metric go straight into MetricLine.
     public void TryParseLine_RoundTripThroughGenerator()
     {
         var original = "tcp_probe_duration_seconds{instance=\"example.com\",port=\"8080\",note=\"a\\nb\"} 0.0123 1395066363000";
@@ -280,20 +275,20 @@ public sealed class PrometheusParserTests
         Assert.Equal(m.Timestamp, m2.Timestamp);
     }
 
-    // Мутабельные лейблы распарсенной метрики: добавление/замена/удаление и ре-эмит
+    // Mutable labels of a parsed metric: add, replace, remove, and re-emit
 
     [Fact]
     public void ParsedMetric_Labels_CanBeAddedReplacedAndRemoved()
     {
         Assert.True(PrometheusParser.TryParseLine("m{a=\"1\",b=\"2\"} 3", out var m));
 
-        m!.Labels["a"] = "10";    // замена
-        m.Labels["c"] = "3";     // добавление
-        m.Labels.Remove("b");    // удаление
+        m!.Labels["a"] = "10";    // replace
+        m.Labels["c"] = "3";      // add
+        m.Labels.Remove("b");     // remove
 
         Assert.Equal(new Dictionary<string, string> { ["a"] = "10", ["c"] = "3" }, m.Labels);
 
-        var line = PrometheusParser.MetricLine(m.Name, m.Value!.Value, m.Labels, Ts);
+        var line = PrometheusParser.MetricLine(m.Name, m.Value!.Value, m.Labels, _timestamp);
         Assert.Equal("m{a=\"10\",c=\"3\"} 3 1690000000000", line);
     }
 }
