@@ -5,12 +5,11 @@ namespace Monq.Plugins.Extensions.Tests;
 
 public sealed class PrometheusParserTextTests
 {
-    // Fennel-овский Prometheus.ParseText: целый текст одним вызовом,
-    // терпимо — не-метрические и битые строки пропускаются, исключений нет.
+    // ParseText processes a complete document and skips non-metric or malformed lines.
 
     [Fact]
-    // Тот же корпус спецификации, что и TryParseLine_PrometheusSpecCorpus:
-    // 20 метрик из 36 строк, HELP/TYPE/комментарии/пустые не в счёт.
+    // The same specification corpus as TryParseLine_PrometheusSpecCorpus:
+    // 20 metrics among 36 lines; HELP/TYPE/comment/blank lines are not counted.
     public void ParseText_PrometheusSpecCorpus()
     {
         const string corpus = """
@@ -65,7 +64,7 @@ public sealed class PrometheusParserTextTests
     {
         Assert.Empty(PrometheusParser.ParseText(null));
         Assert.Empty(PrometheusParser.ParseText(""));
-        Assert.Empty(PrometheusParser.ParseText("# только комментарии\nи ещё один\n"));
+        Assert.Empty(PrometheusParser.ParseText("# comments only\nand another one\n"));
     }
 
     [Fact]
@@ -98,8 +97,8 @@ public sealed class PrometheusParserTextTests
     }
 
     [Fact]
-    // Типичный кейс скрейпера: скрап -> докинуть свой лейбл в каждую метрику
-    // -> переиздать строки для артефакта.
+    // Typical scraper flow: scrape, add a custom label to every metric,
+    // and re-emit the lines for the artifact.
     public void ParseText_ScrapeAddLabelReEmit_FullFlow()
     {
         const string text = """
@@ -123,7 +122,7 @@ public sealed class PrometheusParserTextTests
 
         Assert.Equal("http_requests_total{method=\"post\",code=\"200\",shard=\"1\"} 1027 1395066363000", regenerated);
 
-        // Ре-эмитится обратно в тот же формат, порядок исходных лейблов сохранён
+        // Re-emitted into the same format; the original label order is preserved
         Assert.True(PrometheusParser.TryParseLine(regenerated, out var m2));
         Assert.Equal("1", m2!.Labels["shard"]);
         Assert.Equal("post", m2.Labels["method"]);

@@ -8,9 +8,8 @@ public sealed class PrometheusParserGeneratorTests
     static readonly DateTimeOffset _timestamp = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
 
     [Fact]
-    // Ожидание взято из тестового корпуса Fennel (CSharpApiTests.MetricLine) —
-    // якорь байт-сравнимости с прежним выводом.
-    public void MetricLine_MatchesFennelOutput()
+    // Expected output follows the Prometheus text exposition format.
+    public void MetricLine_MatchesExpectedOutput()
     {
         var labels = new Dictionary<string, string> { ["method"] = "post", ["code"] = "200" };
 
@@ -36,8 +35,7 @@ public sealed class PrometheusParserGeneratorTests
     }
 
     [Fact]
-    // Значения лейблов из тестового корпуса Fennel (ParseText: escaping in label values) —
-    // проверено, что парсер агента принимает именно такую экранизацию.
+    // Label values exercise every escape sequence supported by the parser.
     public void MetricLine_EscapesLabelValues()
     {
         var labels = new Dictionary<string, string>
@@ -72,8 +70,7 @@ public sealed class PrometheusParserGeneratorTests
     }
 
     [Fact]
-    // Формы спецификации: Fennel (pfloat, case-fold) принимает их обратно —
-    // круг «скрап -> ре-эмит» замыкается (корпус: something_weird … +Inf)
+    // Specification forms must preserve scrape-render parity.
     public void MetricLine_Infinity_RendersSpecForms()
     {
         Assert.Equal("m +Inf 1690000000000", PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), _timestamp));
@@ -97,8 +94,7 @@ public sealed class PrometheusParserGeneratorTests
     }
 
     [Fact]
-    // «:» в имени лейбла: у Fennel метрика и лейбл — один pname, парсер агента
-    // принимает «:» в лейблах, генератору паритет с парсером обязателен
+    // Colons are supported in label names by the accepted exposition syntax.
     public void MetricLine_LabelNameWithColon_IsAllowed()
     {
         var labels = new Dictionary<string, string> { ["a:b"] = "1" };

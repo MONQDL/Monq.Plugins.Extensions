@@ -80,102 +80,6 @@ public static partial class PrometheusParser
             .ToString();
     }
 
-    static void AppendLabels(StringBuilder sb, IReadOnlyDictionary<string, string> labels)
-    {
-        sb.Append('{');
-        var first = true;
-        foreach (var (key, val) in labels)
-        {
-            if (!LabelNameRegex().IsMatch(key))
-                throw new ArgumentException($"Invalid Prometheus label name: '{key}'.", nameof(key));
-
-            if (!first)
-                sb.Append(',');
-
-            sb.Append(key).Append("=\"");
-            AppendEscapedLabelValue(sb, val);
-            sb.Append('"');
-            first = false;
-        }
-
-        sb.Append('}');
-    }
-
-    /// <summary>
-    /// Экранирует значение лейбла согласно exposition format.
-    /// </summary>
-    internal static string EscapeLabelValue(string value)
-    {
-        var sb = new StringBuilder(value.Length);
-        AppendEscapedLabelValue(sb, value);
-        return sb.ToString();
-    }
-
-    static void AppendEscapedLabelValue(StringBuilder sb, string value)
-    {
-        foreach (var ch in value)
-        {
-            switch (ch)
-            {
-                case '\\': sb.Append("\\\\"); break;
-                case '"': sb.Append("\\\""); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                default: sb.Append(ch); break;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Форматирует значение метрики в инвариантной культуре.
-    /// </summary>
-    internal static string FormatValue(double value)
-    {
-        if (double.IsNaN(value))
-            return "Nan";
-
-        // Формы спецификации; Fennel (pfloat, case-fold) принимает их обратно —
-        // круг ре-эмита замыкается (корпус: something_weird … +Inf)
-        if (double.IsPositiveInfinity(value))
-            return "+Inf";
-
-        if (double.IsNegativeInfinity(value))
-            return "-Inf";
-
-        return value.ToString(CultureInfo.InvariantCulture);
-    }
-
-    static void AppendValue(StringBuilder sb, double value)
-    {
-        if (double.IsNaN(value))
-        {
-            sb.Append("Nan");
-            return;
-        }
-
-        if (double.IsPositiveInfinity(value))
-        {
-            sb.Append("+Inf");
-            return;
-        }
-
-        if (double.IsNegativeInfinity(value))
-        {
-            sb.Append("-Inf");
-            return;
-        }
-
-        Span<char> buffer = stackalloc char[FormattedDoubleBufferLength];
-        if (!value.TryFormat(buffer, out var charsWritten, provider: CultureInfo.InvariantCulture))
-        {
-            sb.Append(value.ToString(CultureInfo.InvariantCulture));
-            return;
-        }
-
-        sb.Append(buffer[..charsWritten]);
-    }
-
     /// <summary>
     /// Parses all valid metric lines from Prometheus text, such as a <c>/metrics</c> response.
     /// </summary>
@@ -189,8 +93,8 @@ public static partial class PrometheusParser
         if (string.IsNullOrEmpty(text))
             return metrics;
 
-        // Один проход по тексту; строки режутся индексами, без Split и
-        // промежуточных строк (TryParseLine принимает span напрямую).
+        // A single pass over the text: lines are sliced by index without Split or intermediate
+        // strings (TryParseLine accepts a span directly).
         var start = 0;
         for (var i = 0; i < text.Length; i++)
         {
@@ -202,7 +106,7 @@ public static partial class PrometheusParser
             start = i + 1;
         }
 
-        // Последняя строка без завершающего '\n'
+        // The last line may lack a terminating '\n'.
         if (start < text.Length && TryParseLine(text.AsSpan(start), out var lastLine))
             metrics.Add(lastLine);
 
@@ -230,12 +134,86 @@ public static partial class PrometheusParser
         return TryParseLine(line.AsSpan(), out metric);
     }
 
+    internal static string EscapeLabelValue(string value)
+    {
+        var sb = new StringBuilder(value.Length);
+        AppendEscapedLabelValue(sb, value);
+        return sb.ToString();
+    }
+
+    internal static string FormatValue(double value)
+        => FormatSpecialValue(value) ?? value.ToString(CultureInfo.InvariantCulture);
+
+    static void AppendLabels(StringBuilder sb, IReadOnlyDictionary<string, string> labels)
+    {
+        sb.Append('{');
+        var first = true;
+        foreach (var (key, val) in labels)
+        {
+            if (!LabelNameRegex().IsMatch(key))
+                throw new ArgumentException($"Invalid Prometheus label name: '{key}'.", nameof(key));
+
+            if (!first)
+                sb.Append(',');
+
+            sb.Append(key).Append("=\"");
+            AppendEscapedLabelValue(sb, val);
+            sb.Append('"');
+            first = false;
+        }
+
+        sb.Append('}');
+    }
+
+    static void AppendEscapedLabelValue(StringBuilder sb, string value)
+    {
+        foreach (var ch in value)
+        {
+            switch (ch)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '"': sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default: sb.Append(ch); break;
+            }
+        }
+    }
+
+    static void AppendValue(StringBuilder sb, double value)
+    {
+        var specialValue = FormatSpecialValue(value);
+        if (specialValue is not null)
+        {
+            sb.Append(specialValue);
+            return;
+        }
+
+        Span<char> buffer = stackalloc char[FormattedDoubleBufferLength];
+        if (!value.TryFormat(buffer, out var charsWritten, provider: CultureInfo.InvariantCulture))
+        {
+            sb.Append(value.ToString(CultureInfo.InvariantCulture));
+            return;
+        }
+
+        sb.Append(buffer[..charsWritten]);
+    }
+
+    static string? FormatSpecialValue(double value) => value switch
+    {
+        var number when double.IsNaN(number) => "Nan",
+        double.PositiveInfinity => "+Inf",
+        double.NegativeInfinity => "-Inf",
+        _ => null
+    };
+
     static bool TryParseLine(ReadOnlySpan<char> line, [NotNullWhen(true)] out ParsedMetric? metric)
     {
         metric = null;
         var pos = 0;
 
-        // 1) Имя метрики
+        // 1) Metric name
         SkipWhitespace(line, ref pos);
         if (pos >= line.Length || !IsNameStartChar(line[pos]))
             return false;
@@ -243,9 +221,8 @@ public static partial class PrometheusParser
         while (pos < line.Length && IsNameChar(line[pos]))
             pos++;
         var name = line[nameStart..pos].ToString();
-        // 2) Необязательный блок лейблов.
-        // Словарь и собирает пары, и отбраковывает дубликаты имён (TryAdd);
-        // порядок вставки сохранён, поэтому ре-эмит воспроизводит порядок лейблов.
+        // 2) Optional label block. The dictionary both collects pairs and rejects duplicate
+        // names (TryAdd); insertion order is preserved, so re-emitted lines keep label order.
         Dictionary<string, string>? labels = null;
         SkipWhitespace(line, ref pos);
         if (pos < line.Length && line[pos] == '{')
@@ -254,18 +231,18 @@ public static partial class PrometheusParser
                 return false;
         }
 
-        // 3) Значение (обязательное)
+        // 3) Value (required)
         SkipWhitespace(line, ref pos);
         if (pos >= line.Length || !TryParseValue(line, ref pos, out var value))
             return false;
 
-        // 4) Необязательный timestamp
+        // 4) Optional timestamp
         DateTimeOffset? timestamp = null;
         SkipWhitespace(line, ref pos);
         if (pos < line.Length && !TryParseTimestamp(line, ref pos, out timestamp))
             return false;
 
-        // 5) После таймстемпа — только пробельные символы
+        // 5) Only whitespace may follow the timestamp
         SkipWhitespace(line, ref pos);
         if (pos != line.Length)
             return false;
@@ -276,21 +253,21 @@ public static partial class PrometheusParser
 
     static bool TryParseLabels(ReadOnlySpan<char> line, ref int pos, ref Dictionary<string, string>? labels)
     {
-        // pos указывает на '{'
+        // pos points at '{'
         pos++;
 
         while (true)
         {
             SkipWhitespace(line, ref pos);
 
-            // К закрывающей '}' можно подойти сразу: пустые {} и хвостовая запятая {a="1",}
+            // '}' may come right away: an empty block {} or a trailing comma {a="1",}
             if (pos < line.Length && line[pos] == '}')
             {
                 pos++;
                 return true;
             }
 
-            // Имя лейбла
+            // Label name
             if (pos >= line.Length || !IsNameStartChar(line[pos]))
                 return false;
             var nameStart = pos;
@@ -309,7 +286,7 @@ public static partial class PrometheusParser
                 return false;
             pos++;
 
-            // Значение лейбла до закрывающей '"', с разэскейпингом
+            // Label value up to the closing '"', unescaped
             if (!TryParseLabelValue(line, ref pos, out var labelValue))
                 return false;
 
@@ -318,7 +295,7 @@ public static partial class PrometheusParser
             if (!labels.TryAdd(labelName, labelValue))
                 return false;
 
-            // После значения: ',' (следующий лейбл) или '}' (конец блока)
+            // After a value: ',' (next label) or '}' (end of the block)
             SkipWhitespace(line, ref pos);
             if (pos >= line.Length)
                 return false;
@@ -339,7 +316,7 @@ public static partial class PrometheusParser
     static bool TryParseLabelValue(ReadOnlySpan<char> line, ref int pos, out string value)
     {
         value = string.Empty;
-        // pos указывает на первый символ после открывающей '"'
+        // pos points at the first character after the opening '"'
         var valueStart = pos;
         var valueEnd = -1;
         var hasEscape = false;
@@ -351,7 +328,7 @@ public static partial class PrometheusParser
             {
                 pos++;
                 if (pos >= line.Length)
-                    return false; // «висячий» '\' в конце строки
+                    return false; // a dangling '\' at the end of the line
                 var next = line[pos];
                 if (next is not ('n' or 'r' or 't' or '\\' or '"'))
                     return false;
@@ -370,14 +347,14 @@ public static partial class PrometheusParser
             }
         }
 
-        if (valueEnd < 0) // закрывающая '"' не найдена
+        if (valueEnd < 0) // the closing '"' was not found
         {
             value = string.Empty;
             return false;
         }
 
-        // Копия значения ровно одна: без эскейпов — слайс исходной строки
-        // (StringBuilder не нужен); с эскейпами — разэскейп в билдер.
+        // The value is copied exactly once: without escapes it is a slice of the source line
+        // (no StringBuilder needed); with escapes it is unescaped into a builder.
         if (!hasEscape)
         {
             value = line[valueStart..valueEnd].ToString();
@@ -412,9 +389,9 @@ public static partial class PrometheusParser
     {
         value = null;
 
-        // Токен до следующего пробела (пробел внутри значений здесь невозможен:
-        // блок лейблов, если был, уже потреблён выше). Токен не режется в строку —
-        // сравнивается и парсится span'ом.
+        // The token runs to the next space (a space cannot occur inside a value here: the label
+        // block, if any, was consumed above). The token is not cut into a string; it is compared
+        // and parsed as a span.
         var tokenStart = pos;
         while (pos < line.Length && !char.IsWhiteSpace(line[pos]))
             pos++;
@@ -433,7 +410,7 @@ public static partial class PrometheusParser
             return true;
         }
         if (token.SequenceEqual("NaN") || token.SequenceEqual("Nan"))
-            return true; // value остаётся null
+            return true; // value remains null
         if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var result))
         {
             value = result;
@@ -457,9 +434,8 @@ public static partial class PrometheusParser
         if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms))
             return false;
 
-        // Проверка диапазона: int64 влезает шире диапазона DateTimeOffset, и
-        // FromUnixTimeMilliseconds на нём бросает — такая строка невалидна,
-        // а не весь текст (контракт: терпимо, без исключений)
+        // Int64 covers a wider range than DateTimeOffset. Treat an out-of-range timestamp as an
+        // invalid metric line instead of allowing FromUnixTimeMilliseconds to throw.
         if (ms < _minTimestampMs || ms > _maxTimestampMs)
             return false;
 
