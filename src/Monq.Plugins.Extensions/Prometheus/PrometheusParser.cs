@@ -38,6 +38,9 @@ namespace Monq.Plugins.Extensions.Prometheus;
 /// </summary>
 public static partial class PrometheusParser
 {
+    const int EstimatedMetricSuffixLength = 32;
+    const int FormattedDoubleBufferLength = 64;
+
     [GeneratedRegex("^[a-zA-Z_:][a-zA-Z0-9_:]*$")]
     private static partial Regex MetricNameRegex();
 
@@ -65,19 +68,21 @@ public static partial class PrometheusParser
         if (!MetricNameRegex().IsMatch(name))
             throw new ArgumentException($"Invalid Prometheus metric name: '{name}'.", nameof(name));
 
-        return new StringBuilder()
-            .Append(name)
-            .Append(labels.Count == 0 ? string.Empty : RenderLabels(labels))
-            .Append(' ')
-            .Append(FormatValue(value))
+        var sb = new StringBuilder(name.Length + EstimatedMetricSuffixLength).Append(name);
+        if (labels.Count > 0)
+            AppendLabels(sb, labels);
+
+        sb.Append(' ');
+        AppendValue(sb, value);
+        return sb
             .Append(' ')
             .Append(timestamp.ToUnixTimeMilliseconds())
             .ToString();
     }
 
-    static string RenderLabels(IReadOnlyDictionary<string, string> labels)
+    static void AppendLabels(StringBuilder sb, IReadOnlyDictionary<string, string> labels)
     {
-        var sb = new StringBuilder("{");
+        sb.Append('{');
         var first = true;
         foreach (var (key, val) in labels)
         {
@@ -87,11 +92,13 @@ public static partial class PrometheusParser
             if (!first)
                 sb.Append(',');
 
-            sb.Append(key).Append("=\"").Append(EscapeLabelValue(val)).Append('"');
+            sb.Append(key).Append("=\"");
+            AppendEscapedLabelValue(sb, val);
+            sb.Append('"');
             first = false;
         }
 
-        return sb.Append('}').ToString();
+        sb.Append('}');
     }
 
     /// <summary>
@@ -100,6 +107,12 @@ public static partial class PrometheusParser
     internal static string EscapeLabelValue(string value)
     {
         var sb = new StringBuilder(value.Length);
+        AppendEscapedLabelValue(sb, value);
+        return sb.ToString();
+    }
+
+    static void AppendEscapedLabelValue(StringBuilder sb, string value)
+    {
         foreach (var ch in value)
         {
             switch (ch)
@@ -112,8 +125,6 @@ public static partial class PrometheusParser
                 default: sb.Append(ch); break;
             }
         }
-
-        return sb.ToString();
     }
 
     /// <summary>
@@ -128,6 +139,27 @@ public static partial class PrometheusParser
             throw new ArgumentException("Infinity is not a representable Prometheus metric value.", nameof(value));
 
         return value.ToString(CultureInfo.InvariantCulture);
+    }
+
+    static void AppendValue(StringBuilder sb, double value)
+    {
+        if (double.IsNaN(value))
+        {
+            sb.Append("Nan");
+            return;
+        }
+
+        if (double.IsPositiveInfinity(value) || double.IsNegativeInfinity(value))
+            throw new ArgumentException("Infinity is not a representable Prometheus metric value.", nameof(value));
+
+        Span<char> buffer = stackalloc char[FormattedDoubleBufferLength];
+        if (!value.TryFormat(buffer, out var charsWritten, provider: CultureInfo.InvariantCulture))
+        {
+            sb.Append(value.ToString(CultureInfo.InvariantCulture));
+            return;
+        }
+
+        sb.Append(buffer[..charsWritten]);
     }
 
     /// <summary>
