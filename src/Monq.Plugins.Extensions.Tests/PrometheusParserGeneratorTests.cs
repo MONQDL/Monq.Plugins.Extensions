@@ -1,16 +1,15 @@
-using Monq.Plugins.Prometheus;
+using Monq.Plugins.Extensions.Prometheus;
 using Xunit;
 
 namespace Monq.Plugins.Extensions.Tests;
 
 public sealed class PrometheusParserGeneratorTests
 {
-    static readonly DateTimeOffset Ts = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
+    static readonly DateTimeOffset _timestamp = DateTimeOffset.FromUnixTimeMilliseconds(1690000000000);
 
     [Fact]
-    // Ожидание взято из тестового корпуса Fennel (CSharpApiTests.MetricLine) —
-    // якорь байт-сравнимости с прежним выводом.
-    public void MetricLine_MatchesFennelOutput()
+    // Expected output follows the Prometheus text exposition format.
+    public void MetricLine_MatchesExpectedOutput()
     {
         var labels = new Dictionary<string, string> { ["method"] = "post", ["code"] = "200" };
 
@@ -22,7 +21,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_WithoutLabels()
     {
-        var line = PrometheusParser.MetricLine("metric_without_labels", 12.47, new Dictionary<string, string>(), Ts);
+        var line = PrometheusParser.MetricLine("metric_without_labels", 12.47, new Dictionary<string, string>(), _timestamp);
 
         Assert.Equal("metric_without_labels 12.47 1690000000000", line);
     }
@@ -30,14 +29,13 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_IntegerValue_HasNoDecimalPoint()
     {
-        var line = PrometheusParser.MetricLine("tcp_probe_success", 1.0, new Dictionary<string, string>(), Ts);
+        var line = PrometheusParser.MetricLine("tcp_probe_success", 1.0, new Dictionary<string, string>(), _timestamp);
 
         Assert.Equal("tcp_probe_success 1 1690000000000", line);
     }
 
     [Fact]
-    // Значения лейблов из тестового корпуса Fennel (ParseText: escaping in label values) —
-    // проверено, что парсер агента принимает именно такую экранизацию.
+    // Label values exercise every escape sequence supported by the parser.
     public void MetricLine_EscapesLabelValues()
     {
         var labels = new Dictionary<string, string>
@@ -46,7 +44,7 @@ public sealed class PrometheusParserGeneratorTests
             ["error"] = "Cannot find file:\n \"FILE.TXT\" ",
         };
 
-        var line = PrometheusParser.MetricLine("msdos_file_access_time_seconds", 1458255915.0, labels, Ts);
+        var line = PrometheusParser.MetricLine("msdos_file_access_time_seconds", 1458255915.0, labels, _timestamp);
 
         Assert.Equal(
             "msdos_file_access_time_seconds{path=\"C:\\\\DIR\\\\FILE.TXT\",error=\"Cannot find file:\\n \\\"FILE.TXT\\\" \"} 1458255915 1690000000000",
@@ -58,7 +56,7 @@ public sealed class PrometheusParserGeneratorTests
     {
         var labels = new Dictionary<string, string> { ["instance"] = "example.com", ["port"] = "8080", ["custom"] = "v" };
 
-        var line = PrometheusParser.MetricLine("m", 0.5, labels, Ts);
+        var line = PrometheusParser.MetricLine("m", 0.5, labels, _timestamp);
 
         Assert.Equal("m{instance=\"example.com\",port=\"8080\",custom=\"v\"} 0.5 1690000000000", line);
     }
@@ -66,26 +64,25 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_Nan_RendersNan()
     {
-        var line = PrometheusParser.MetricLine("m", double.NaN, new Dictionary<string, string>(), Ts);
+        var line = PrometheusParser.MetricLine("m", double.NaN, new Dictionary<string, string>(), _timestamp);
 
         Assert.Equal("m Nan 1690000000000", line);
     }
 
     [Fact]
-    // Формы спецификации: Fennel (pfloat, case-fold) принимает их обратно —
-    // круг «скрап -> ре-эмит» замыкается (корпус: something_weird … +Inf)
+    // Specification forms must preserve scrape-render parity.
     public void MetricLine_Infinity_RendersSpecForms()
     {
-        Assert.Equal("m +Inf 1690000000000", PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), Ts));
-        Assert.Equal("m -Inf 1690000000000", PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), Ts));
+        Assert.Equal("m +Inf 1690000000000", PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), _timestamp));
+        Assert.Equal("m -Inf 1690000000000", PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), _timestamp));
     }
 
     [Fact]
     public void MetricLine_InvalidMetricName_Throws()
     {
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("1bad", 1.0, new Dictionary<string, string>(), Ts));
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("bad-name", 1.0, new Dictionary<string, string>(), Ts));
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("", 1.0, new Dictionary<string, string>(), Ts));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("1bad", 1.0, new Dictionary<string, string>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("bad-name", 1.0, new Dictionary<string, string>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("", 1.0, new Dictionary<string, string>(), _timestamp));
     }
 
     [Fact]
@@ -93,17 +90,16 @@ public sealed class PrometheusParserGeneratorTests
     {
         var labels = new Dictionary<string, string> { ["9x"] = "v" };
 
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("m", 1.0, labels, Ts));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("m", 1.0, labels, _timestamp));
     }
 
     [Fact]
-    // «:» в имени лейбла: у Fennel метрика и лейбл — один pname, парсер агента
-    // принимает «:» в лейблах, генератору паритет с парсером обязателен
+    // Colons are supported in label names by the accepted exposition syntax.
     public void MetricLine_LabelNameWithColon_IsAllowed()
     {
         var labels = new Dictionary<string, string> { ["a:b"] = "1" };
 
-        var line = PrometheusParser.MetricLine("m", 1.0, labels, Ts);
+        var line = PrometheusParser.MetricLine("m", 1.0, labels, _timestamp);
 
         Assert.Equal("m{a:b=\"1\"} 1 1690000000000", line);
     }
