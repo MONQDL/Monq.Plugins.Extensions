@@ -55,14 +55,17 @@ public static partial class PrometheusParser
     /// </summary>
     /// <param name="name">The metric name.</param>
     /// <param name="value">The metric value.</param>
-    /// <param name="labels">The labels to render in enumeration order.</param>
+    /// <param name="labels">
+    /// The labels to render in enumeration order. Labels with a <see langword="null"/> value are
+    /// omitted.
+    /// </param>
     /// <param name="timestamp">The sample timestamp.</param>
     /// <returns>The rendered metric line.</returns>
     /// <exception cref="ArgumentException"><paramref name="name"/> or a label name is invalid.</exception>
     public static string MetricLine(
         string name,
         double value,
-        IReadOnlyDictionary<string, string> labels,
+        IReadOnlyDictionary<string, string?> labels,
         DateTimeOffset timestamp)
     {
         if (!MetricNameRegex().IsMatch(name))
@@ -144,16 +147,20 @@ public static partial class PrometheusParser
     internal static string FormatValue(double value)
         => FormatSpecialValue(value) ?? value.ToString(CultureInfo.InvariantCulture);
 
-    static void AppendLabels(StringBuilder sb, IReadOnlyDictionary<string, string> labels)
+    static void AppendLabels(StringBuilder sb, IReadOnlyDictionary<string, string?> labels)
     {
-        sb.Append('{');
         var first = true;
         foreach (var (key, val) in labels)
         {
+            if (val is null)
+                continue;
+
             if (!LabelNameRegex().IsMatch(key))
                 throw new ArgumentException($"Invalid Prometheus label name: '{key}'.", nameof(key));
 
-            if (!first)
+            if (first)
+                sb.Append('{');
+            else
                 sb.Append(',');
 
             sb.Append(key).Append("=\"");
@@ -162,7 +169,8 @@ public static partial class PrometheusParser
             first = false;
         }
 
-        sb.Append('}');
+        if (!first)
+            sb.Append('}');
     }
 
     static void AppendEscapedLabelValue(StringBuilder sb, string value)
@@ -223,7 +231,7 @@ public static partial class PrometheusParser
         var name = line[nameStart..pos].ToString();
         // 2) Optional label block. The dictionary both collects pairs and rejects duplicate
         // names (TryAdd); insertion order is preserved, so re-emitted lines keep label order.
-        Dictionary<string, string>? labels = null;
+        Dictionary<string, string?>? labels = null;
         SkipWhitespace(line, ref pos);
         if (pos < line.Length && line[pos] == '{')
         {
@@ -251,7 +259,7 @@ public static partial class PrometheusParser
         return true;
     }
 
-    static bool TryParseLabels(ReadOnlySpan<char> line, ref int pos, ref Dictionary<string, string>? labels)
+    static bool TryParseLabels(ReadOnlySpan<char> line, ref int pos, ref Dictionary<string, string?>? labels)
     {
         // pos points at '{'
         pos++;
@@ -291,7 +299,7 @@ public static partial class PrometheusParser
                 return false;
 
             // Duplicate label names are ambiguous and therefore rejected.
-            labels ??= new Dictionary<string, string>(4);
+            labels ??= new Dictionary<string, string?>(4);
             if (!labels.TryAdd(labelName, labelValue))
                 return false;
 

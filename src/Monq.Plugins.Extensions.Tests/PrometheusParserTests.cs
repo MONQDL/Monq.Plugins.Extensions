@@ -16,7 +16,7 @@ public sealed class PrometheusParserTests
 
         Assert.True(ok);
         Assert.Equal("http_requests_total", m!.Name);
-        Assert.Equal(new Dictionary<string, string> { ["method"] = "post", ["code"] = "200" }, m.Labels);
+        Assert.Equal(new Dictionary<string, string?> { ["method"] = "post", ["code"] = "200" }, m.Labels);
         Assert.Equal(1027.0, m.Value);
         Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1395066363000), m.Timestamp);
     }
@@ -71,7 +71,7 @@ public sealed class PrometheusParserTests
 
         Assert.True(ok);
         Assert.Equal(
-            new Dictionary<string, string> { ["path"] = @"C:\DIR\FILE.TXT", ["error"] = "Cannot find file:\n \"FILE.TXT\" " },
+            new Dictionary<string, string?> { ["path"] = @"C:\DIR\FILE.TXT", ["error"] = "Cannot find file:\n \"FILE.TXT\" " },
             m!.Labels);
         Assert.Equal(1.458255915e9, m.Value);
         Assert.Null(m.Timestamp);
@@ -92,7 +92,7 @@ public sealed class PrometheusParserTests
         var ok = PrometheusParser.TryParseLine("http_request_duration_seconds_bucket{le=\"+Inf\"} 144320", out var m);
 
         Assert.True(ok);
-        Assert.Equal(new Dictionary<string, string> { ["le"] = "+Inf" }, m!.Labels);
+        Assert.Equal(new Dictionary<string, string?> { ["le"] = "+Inf" }, m!.Labels);
         Assert.Equal(144320.0, m.Value);
     }
 
@@ -124,7 +124,7 @@ public sealed class PrometheusParserTests
         var ok = PrometheusParser.TryParseLine("m{a=\"1\",} 2", out var m);
 
         Assert.True(ok);
-        Assert.Equal(new Dictionary<string, string> { ["a"] = "1" }, m!.Labels);
+        Assert.Equal(new Dictionary<string, string?> { ["a"] = "1" }, m!.Labels);
         Assert.Equal(2.0, m.Value);
     }
 
@@ -286,7 +286,7 @@ public sealed class PrometheusParserTests
         m.Labels["c"] = "3";      // add
         m.Labels.Remove("b");     // remove
 
-        Assert.Equal(new Dictionary<string, string> { ["a"] = "10", ["c"] = "3" }, m.Labels);
+        Assert.Equal(new Dictionary<string, string?> { ["a"] = "10", ["c"] = "3" }, m.Labels);
 
         var line = PrometheusParser.MetricLine(m.Name, m.Value!.Value, m.Labels, _timestamp);
         Assert.Equal("m{a=\"10\",c=\"3\"} 3 1690000000000", line);
