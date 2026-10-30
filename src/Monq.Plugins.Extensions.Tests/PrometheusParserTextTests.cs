@@ -55,7 +55,7 @@ public sealed class PrometheusParserTextTests
 
         Assert.Equal(20, metrics.Count);
         Assert.Equal("http_requests_total", metrics[0].Name);
-        Assert.Equal(new Dictionary<string, string> { ["method"] = "post", ["code"] = "200" }, metrics[0].Labels);
+        Assert.Equal(new Dictionary<string, string?> { ["method"] = "post", ["code"] = "200" }, metrics[0].Labels);
         Assert.Equal(1027.0, metrics[0].Value);
     }
 

@@ -11,7 +11,7 @@ public sealed class PrometheusParserGeneratorTests
     // Expected output follows the Prometheus text exposition format.
     public void MetricLine_MatchesExpectedOutput()
     {
-        var labels = new Dictionary<string, string> { ["method"] = "post", ["code"] = "200" };
+        var labels = new Dictionary<string, string?> { ["method"] = "post", ["code"] = "200" };
 
         var line = PrometheusParser.MetricLine("http_requests_total", 1027, labels, DateTimeOffset.FromUnixTimeMilliseconds(1395066363000));
 
@@ -21,7 +21,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_WithoutLabels()
     {
-        var line = PrometheusParser.MetricLine("metric_without_labels", 12.47, new Dictionary<string, string>(), _timestamp);
+        var line = PrometheusParser.MetricLine("metric_without_labels", 12.47, new Dictionary<string, string?>(), _timestamp);
 
         Assert.Equal("metric_without_labels 12.47 1690000000000", line);
     }
@@ -29,7 +29,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_IntegerValue_HasNoDecimalPoint()
     {
-        var line = PrometheusParser.MetricLine("tcp_probe_success", 1.0, new Dictionary<string, string>(), _timestamp);
+        var line = PrometheusParser.MetricLine("tcp_probe_success", 1.0, new Dictionary<string, string?>(), _timestamp);
 
         Assert.Equal("tcp_probe_success 1 1690000000000", line);
     }
@@ -38,7 +38,7 @@ public sealed class PrometheusParserGeneratorTests
     // Label values exercise every escape sequence supported by the parser.
     public void MetricLine_EscapesLabelValues()
     {
-        var labels = new Dictionary<string, string>
+        var labels = new Dictionary<string, string?>
         {
             ["path"] = @"C:\DIR\FILE.TXT",
             ["error"] = "Cannot find file:\n \"FILE.TXT\" ",
@@ -54,7 +54,7 @@ public sealed class PrometheusParserGeneratorTests
     [Fact]
     public void MetricLine_PreservesLabelOrder()
     {
-        var labels = new Dictionary<string, string> { ["instance"] = "example.com", ["port"] = "8080", ["custom"] = "v" };
+        var labels = new Dictionary<string, string?> { ["instance"] = "example.com", ["port"] = "8080", ["custom"] = "v" };
 
         var line = PrometheusParser.MetricLine("m", 0.5, labels, _timestamp);
 
@@ -62,9 +62,33 @@ public sealed class PrometheusParserGeneratorTests
     }
 
     [Fact]
+    public void MetricLine_NullLabelValue_OmitsLabel()
+    {
+        var labels = new Dictionary<string, string?>
+        {
+            ["agent"] = null,
+            ["hostname"] = "dynamic-host",
+        };
+
+        var line = PrometheusParser.MetricLine("m", 0.5, labels, _timestamp);
+
+        Assert.Equal("m{hostname=\"dynamic-host\"} 0.5 1690000000000", line);
+    }
+
+    [Fact]
+    public void MetricLine_OnlyNullLabelValues_OmitsLabelBlock()
+    {
+        var labels = new Dictionary<string, string?> { ["agent"] = null };
+
+        var line = PrometheusParser.MetricLine("m", 0.5, labels, _timestamp);
+
+        Assert.Equal("m 0.5 1690000000000", line);
+    }
+
+    [Fact]
     public void MetricLine_Nan_RendersNan()
     {
-        var line = PrometheusParser.MetricLine("m", double.NaN, new Dictionary<string, string>(), _timestamp);
+        var line = PrometheusParser.MetricLine("m", double.NaN, new Dictionary<string, string?>(), _timestamp);
 
         Assert.Equal("m Nan 1690000000000", line);
     }
@@ -73,22 +97,22 @@ public sealed class PrometheusParserGeneratorTests
     // Specification forms must preserve scrape-render parity.
     public void MetricLine_Infinity_RendersSpecForms()
     {
-        Assert.Equal("m +Inf 1690000000000", PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string>(), _timestamp));
-        Assert.Equal("m -Inf 1690000000000", PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string>(), _timestamp));
+        Assert.Equal("m +Inf 1690000000000", PrometheusParser.MetricLine("m", double.PositiveInfinity, new Dictionary<string, string?>(), _timestamp));
+        Assert.Equal("m -Inf 1690000000000", PrometheusParser.MetricLine("m", double.NegativeInfinity, new Dictionary<string, string?>(), _timestamp));
     }
 
     [Fact]
     public void MetricLine_InvalidMetricName_Throws()
     {
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("1bad", 1.0, new Dictionary<string, string>(), _timestamp));
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("bad-name", 1.0, new Dictionary<string, string>(), _timestamp));
-        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("", 1.0, new Dictionary<string, string>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("1bad", 1.0, new Dictionary<string, string?>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("bad-name", 1.0, new Dictionary<string, string?>(), _timestamp));
+        Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("", 1.0, new Dictionary<string, string?>(), _timestamp));
     }
 
     [Fact]
     public void MetricLine_InvalidLabelName_Throws()
     {
-        var labels = new Dictionary<string, string> { ["9x"] = "v" };
+        var labels = new Dictionary<string, string?> { ["9x"] = "v" };
 
         Assert.Throws<ArgumentException>(() => PrometheusParser.MetricLine("m", 1.0, labels, _timestamp));
     }
@@ -97,7 +121,7 @@ public sealed class PrometheusParserGeneratorTests
     // Colons are supported in label names by the accepted exposition syntax.
     public void MetricLine_LabelNameWithColon_IsAllowed()
     {
-        var labels = new Dictionary<string, string> { ["a:b"] = "1" };
+        var labels = new Dictionary<string, string?> { ["a:b"] = "1" };
 
         var line = PrometheusParser.MetricLine("m", 1.0, labels, _timestamp);
 
